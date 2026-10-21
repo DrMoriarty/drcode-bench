@@ -1,0 +1,33 @@
+[project]
+name = "drcode-bench"
+version = "0.1.0"
+description = "Benchmark harness for the full drcode agent loop (coding → testing → compaction)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # drcode подключается субмодулем ./drcode (см. [tool.uv.sources] ниже).
+    # Без субмодуля замените источник на git-зависимость:
+    #   drcode = { git = "https://github.com/DrMoriarty/drcode.git" }
+    "drcode",
+    "textual>=8.2.8",
+    "rich>=13.0",
+    # tomllib входит в stdlib (python 3.11+), отдельная зависимость не нужна.
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv.sources]
+drcode = { path = "drcode" }
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

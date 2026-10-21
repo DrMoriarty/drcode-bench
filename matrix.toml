@@ -1,0 +1,53 @@
+# Матрица моделей бенчмарка (план drcode-bench.md, §8).
+#
+# Формат провайдеров повторяет models.json.example drcode (Provider/ModelEntry
+# в src/drcode/providers.py): base_url + api_key + список моделей с
+# max_context_tokens / max_tokens / compaction_threshold.
+#
+# api_key поддерживает подстановку из окружения хоста: "env:NAME" читает
+# переменную NAME при генерации config-home/drcode/models.json. Пустая строка
+# = без ключа (локальные OpenAI-совместимые шлюзы).
+
+[providers.provider-a]
+base_url = "https://api.provider-a.example/v1"
+api_key  = "env:PROVIDER_A_KEY"
+
+[providers.provider-a.models.qwen3-coder-30b]
+max_context_tokens = 131072
+max_tokens = 16384
+
+[providers.provider-b]
+base_url = "http://localhost:8080/v1"
+api_key  = ""
+
+[providers.provider-b.models.qwen3-8b]
+max_context_tokens = 131072
+max_tokens = 8192
+
+[providers.provider-b.models.qwen3-8b-small-ctx]
+max_context_tokens = 4096
+max_tokens = 4096
+
+# Комбинации: роль → "provider/model-id". Ровно эти три роли поддерживает
+# drcode.providers.AgentRole: coding / tester / compaction.
+
+[[combo]]
+name       = "strong-coder/cheap-tester"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+
+[[combo]]
+name       = "baseline-single-model"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-a/qwen3-coder-30b"
+compaction = "provider-a/qwen3-coder-30b"
+
+[[combo]]
+# Маленький контекст у кодинговой модели — порог компакции тестера в drcode
+# считается именно от кодинговой модели (план §1.2, §13), поэтому
+# «маленький контекст» всегда ставится кодеру.
+name       = "compaction-pressure"
+coding     = "provider-b/qwen3-8b-small-ctx"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
