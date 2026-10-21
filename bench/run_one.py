@@ -254,6 +254,17 @@ async def run_benchmark(
     if not report.ok:
         dump_diagnostics(run_dir)  # §4: dissect without repeating the run
     report.dump(run_dir)
+
+    # §10: every run leaves metrics.json behind — extracted automatically
+    # right after the run, from the same on-disk state the diagnostics use.
+    # Never fatal: a broken extraction must not flip the run's exit code.
+    try:
+        from .metrics import extract_run_metrics
+
+        extract_run_metrics(run_dir)
+    except Exception as e:  # noqa: BLE001 - metrics are auxiliary
+        print(f"warning: metrics extraction failed: {e}", file=sys.stderr)
+
     return report
 
 

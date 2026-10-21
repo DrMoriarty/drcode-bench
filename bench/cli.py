@@ -1,8 +1,9 @@
 """CLI of drcode-bench (plan §8, §11).
 
-Stage 1 (§12.1): `run` and `report` are stubs — they validate their
-arguments, show the resolved combo/scenario and say clearly what is not
-implemented yet. The orchestrator (`bench/run_one.py`) arrives at stage 2.
+`run` is still the orchestrator stub (§12 stage 5); a SINGLE run is
+available as `python -m bench.run_one <scenario> <combo> <run_dir>` and
+extracts `metrics.json` automatically after the run (§10). `report`
+aggregates `runs/` into `report.md` (§10).
 """
 
 from __future__ import annotations
@@ -52,17 +53,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    """`bench report` — aggregation stub (§10)."""
+    """`bench report` — runs/ → report.md (§10)."""
+    from .report import generate_report
+
     runs_dir = Path(args.runs_dir)
     print(f"runs dir: {runs_dir.resolve()}")
     if not runs_dir.is_dir():
         print("note: the directory does not exist yet — no runs recorded.")
-    print(
-        "\nnot implemented yet: report aggregation (metrics.json → report.md, "
-        "drcode-bench.md §10) arrives with the first real runs. The metric "
-        "sources are described in the plan: task JSON in .drcode/tasks/, "
-        "model_log.jsonl (recorder), user_sim.jsonl."
-    )
+        return 0
+    out = generate_report(runs_dir, out=Path(args.out) if args.out else None)
+    print(f"report:   {out.resolve()}")
     return 0
 
 
@@ -83,8 +83,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--repeats", type=int, default=3, help="repeats per pair")
     run.set_defaults(func=_cmd_run)
 
-    report = sub.add_parser("report", help="aggregate runs into a report (stub)")
+    report = sub.add_parser(
+        "report", help="aggregate runs into report.md (drcode-bench.md §10)"
+    )
     report.add_argument("runs_dir", nargs="?", default="runs", help="runs directory")
+    report.add_argument(
+        "--out", default="", help="output path (default: <runs_dir>/report.md)"
+    )
     report.set_defaults(func=_cmd_report)
 
     return parser

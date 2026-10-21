@@ -187,6 +187,15 @@ async def test_run_one_happy_path_settles_green(
     assert report.ok, report.reason
     assert not report.timed_out
     assert report.checks_ok is True
+    # §10: the run leaves metrics.json behind, extracted automatically.
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["schema"] == "metrics/v1"
+    assert metrics["scenario"] == "s1_happy"
+    assert metrics["verdict"] == "green"
+    assert metrics["totals"]["n_tasks"] == 1
+    assert metrics["totals"]["n_testing_rounds"] == 1
+    (task,) = metrics["tasks"]
+    assert task["phases"]["total_s"] is not None
     (task,) = report.tasks
     assert task["status"] == "completed"
     assert task["verification"] == "Verified successfully"
