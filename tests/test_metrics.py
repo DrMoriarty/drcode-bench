@@ -438,3 +438,309 @@ def test_extract_run_metrics_model_log(tmp_path: Path) -> None:
     assert log["per_role"]["coding"]["requests"] == 1
     assert log["per_role"]["coding"]["latency_ms_total"] == 1200
     assert log["per_role"]["compaction"]["input_tokens"] == 50
+
+
+
+# -- tester compaction threshold source (§1.2/§13, stage 4 / S4) -----------------
+
+from bench.metrics import (  # noqa: E402
+    analyze_tester_threshold,
+    read_context_limits,
+    user_prompt_content,
+    user_prompt_contents,
+    is_summary_message,
+)
+
+T0 = "2024-10-27T05:33:20+00:00"  # epoch 1730000000
+T1 = "2024-10-27T05:33:30+00:00"  # +10 s
+
+
+def _tester_task(events: list[dict], rounds: list[list[dict]]) -> dict:
+    return {
+        "id": "t1",
+        "title": "task",
+        "kind": "bug",
+        "events": events,
+        "tester_messages": rounds,
+        "messages": [],
+    }
+
+
+def test_merged_summary_request_is_detected() -> None:
+    """After a compaction + continuation turn the persisted request carries
+    BOTH the original prompt and the summary as separate user-prompt parts
+    (observed on-disk shape) — summary detection must scan all parts."""
+    msg = {
+        "kind": "request",
+        "timestamp": T0,
+        "parts": [
+            {"part_kind": "user-prompt", "content": "original brief"},
+            {"part_kind": "user-prompt", "content": "[context summary]\n\nsummary body"},
+        ],
+    }
+    assert is_summary_message(msg)
+    assert user_prompt_contents(msg) == [
+        "original brief",
+        "[context summary]\n\nsummary body",
+    ]
+    # drcode's own detector looks only at the FIRST part — the benchmark
+    # deliberately diverges (documented in user_prompt_contents).
+    assert not user_prompt_content(msg).startswith(COMPACTION_SUMMARY_PREFIX)
+
+
+def test_analyze_task_counts_summaries_in_merged_requests() -> None:
+    task = {
+        "id": "t",
+        "title": "task",
+        "kind": "feature",
+        "events": [],
+        "messages": [
+            {
+                "kind": "request",
+                "timestamp": T0,
+                "parts": [
+                    {"part_kind": "user-prompt", "content": "brief"},
+                    {"part_kind": "user-prompt", "content": "[context summary]\n\ns"},
+                ],
+            },
+            response_msg(T1, inp=100, out=10),
+        ],
+        "tester_messages": [],
+    }
+    result = analyze_task(task)
+    assert result["compactions"]["n_summaries_in_transcript"] == 1
+    assert result["compactions"]["repeat_compaction"] is False
+    assert result["transcript"]["n_user_prompts"] == 1  # the brief only
+
+
+def test_analyze_task_repeat_compaction_flagged() -> None:
+    """Two summaries in one transcript = the summary did not stick (§10:
+    degradation after summary) — the metrics must flag it."""
+    task = {
+        "id": "t",
+        "title": "task",
+        "kind": "feature",
+        "events": [],
+        "messages": [
+            request_msg("brief", T0),
+            request_msg("[context summary]\n\ns1", T0),
+            response_msg(T1, inp=100, out=10),
+            request_msg("[context summary]\n\ns2", T1),
+            response_msg(T1, inp=100, out=10),
+        ],
+        "tester_messages": [],
+    }
+    result = analyze_task(task)
+    assert result["compactions"]["n_summaries_in_transcript"] == 2
+    assert result["compactions"]["repeat_compaction"] is True
+
+
+def test_analyze_task_mid_run_vs_turn_boundary() -> None:
+    task = {
+        "id": "t",
+        "title": "task",
+        "kind": "feature",
+        "events": [
+            {"at": T0, "text": "Context fill 85% — pausing the run to compact history…"},
+        ],
+        "messages": [],
+        "tester_messages": [],
+    }
+    comp = analyze_task(task)["compactions"]
+    assert comp["mid_run_pause"] is True
+    assert comp["turn_boundary_pause"] is False
+
+
+def test_tester_threshold_moot_when_limits_equal() -> None:
+    """Equal coding/tester limits: no regression is possible — the
+    classification must say 'coding', not 'tester'/'unknown'."""
+    task = _tester_task(
+        [{"at": T0, "text": "Context fill 87% — pausing the tester round to compact history…"}],
+        [
+            [
+                request_msg("verify", T0),
+                request_msg("[context summary]\n\ns", T0),
+                response_msg(T1, inp=100, out=10),
+            ]
+        ],
+    )
+    result = analyze_tester_threshold(task, {"coding": 100000, "tester": 100000})
+    assert result["source"] == "coding"
+    assert result["classified"] is True
+
+
+def test_tester_threshold_classifies_coding_from_recorder() -> None:
+    """Distinct limits: the pre-compaction tokens come from the recorder
+    log (the mid-round compaction replaced the round in place — the
+    pre-compaction responses are gone); the implied limit must land on the
+    CODING value (§1.2/§13)."""
+    task = _tester_task(
+        [{"at": T1, "text": "Context fill 87% — compacting the testing round…"}],
+        [
+            [
+                request_msg("verify", T0),
+                request_msg("[context summary]\n\ns", T1),
+                response_msg(T1, inp=100, out=10),
+            ]
+        ],
+    )
+    entries = [
+        {
+            "role": "tester-model@http://g/v1",
+            "ts": 1730007200.0,  # T0 — inside the window before the event
+            "usage": {"input_tokens": 87000, "output_tokens": 10},
+        },
+        {"role": "other@x", "ts": 1730000000.0, "usage": {"input_tokens": 999999, "output_tokens": 10}},
+    ]
+    result = analyze_tester_threshold(
+        task,
+        {"coding": 100000, "tester": 500000},
+        log_entries=entries,
+        tester_tag="tester-model@http://g/v1",
+    )
+    assert result["observations"][0]["pre_tokens_est"] == 87000
+    assert result["observations"][0]["implied_max_context_tokens"] == 100000
+    assert result["source"] == "coding"
+    assert result["classified"] is True
+
+
+def test_tester_threshold_flags_tester_source_as_regression() -> None:
+    """The regression case the metrics exist to catch: the implied limit
+    matches the TESTER model's config, not the coding one (§1.2/§13)."""
+    task = _tester_task(
+        [{"at": T1, "text": "Context fill 17% — compacting the testing round…"}],
+        [
+            [
+                request_msg("verify", T0),
+                request_msg("[context summary]\n\ns", T1),
+                response_msg(T1, inp=100, out=10),
+            ]
+        ],
+    )
+    entries = [
+        {
+            "role": "tester-model@http://g/v1",
+            "ts": 1730007200.0,
+            "usage": {"input_tokens": 85000, "output_tokens": 10},
+        },
+    ]
+    result = analyze_tester_threshold(
+        task,
+        {"coding": 100000, "tester": 500000},
+        log_entries=entries,
+        tester_tag="tester-model@http://g/v1",
+    )
+    assert result["observations"][0]["implied_max_context_tokens"] == 500000
+    assert result["source"] == "tester"
+
+
+def test_tester_threshold_none_without_tester_compaction() -> None:
+    task = _tester_task([], [[request_msg("verify", T0)]])
+    assert analyze_tester_threshold(task, {"coding": 100000, "tester": 100000}) is None
+
+
+def test_read_context_limits_prefers_result_json(tmp_path: Path) -> None:
+    (tmp_path / "result.json").write_text(
+        json.dumps({"resolved_context_tokens": {"coding": 3000, "tester": 131072}}),
+        encoding="utf-8",
+    )
+    assert read_context_limits(tmp_path) == {"coding": 3000, "tester": 131072}
+
+
+def test_read_context_limits_reconstructed_from_configs(tmp_path: Path) -> None:
+    """Fallback: the generated configs are parsed the way providers.resolve
+    reads them (project models ref → catalog entry; flat ctx for coding)."""
+    state = tmp_path / "workspace" / ".drcode"
+    state.mkdir(parents=True)
+    catalog_dir = tmp_path / "config-home" / "drcode"
+    catalog_dir.mkdir(parents=True)
+    (state / "drcode.json").write_text(
+        json.dumps(
+            {
+                "max_context_tokens": 3000,
+                "models": {"coding": "p/small", "tester": "p/big"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (catalog_dir / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "name": "p",
+                        "base_url": "http://g/v1",
+                        "models": [
+                            {"id": "small", "max_context_tokens": 3000},
+                            {"id": "big", "max_context_tokens": 131072},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert read_context_limits(tmp_path) == {"coding": 3000, "tester": 131072}
+
+
+def test_extract_run_metrics_carries_threshold_verdict(tmp_path: Path) -> None:
+    """The run-level flag exists in metrics.json and is False on the
+    regression shape (§1.2: the state must be visible in the report)."""
+    tasks_dir = tmp_path / "workspace" / ".drcode" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task = _tester_task(
+        [{"at": T1, "text": "Context fill 17% — compacting the testing round…"}],
+        [
+            [
+                request_msg("verify", T0),
+                request_msg("[context summary]\n\ns", T1),
+                response_msg(T1, inp=100, out=10),
+            ]
+        ],
+    )
+    task.update({"title": "task"})
+    (tasks_dir / "t1.json").write_text(json.dumps(task), encoding="utf-8")
+    (tmp_path / "result.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "resolved_context_tokens": {"coding": 100000, "tester": 500000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "model_log.jsonl").write_text(
+        json.dumps(
+            {
+                "role": "tester-model@http://g/v1",
+                "ts": 1730007200.0,
+                "usage": {"input_tokens": 85000, "output_tokens": 10},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # The tester's recorder tag is reconstructed from the generated configs.
+    state = tmp_path / "workspace" / ".drcode"
+    (state / "drcode.json").write_text(
+        json.dumps({"models": {"tester": "p/tester-model"}}), encoding="utf-8"
+    )
+    catalog_dir = tmp_path / "config-home" / "drcode"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    (catalog_dir / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "name": "p",
+                        "base_url": "http://g/v1",
+                        "models": [{"id": "tester-model", "max_context_tokens": 500000}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    metrics = extract_run_metrics(tmp_path, write=False)
+    assert metrics["tester_threshold_from_coding"] is False
+    assert metrics["totals"]["n_summaries"] >= 1

@@ -1,0 +1,43 @@
+# S2b — the tester files a bug report (plan drcode-bench.md §7). Checks
+# the bug-report queue path: the tester's create_bug_report task (kind=bug)
+# must be executed BEFORE the other queued briefs (bugs sort newest-first
+# at the head of TaskManager.queued()), pass its own testing round, and
+# everything must end COMPLETED with the seed contract green.
+
+id = "s2b_bug_report"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Почините div() (ValueError вместо ZeroDivisionError)"
+kind = "feature"
+text = """
+В calc.py функция div(a, b) при нулевом делителе бросает ZeroDivisionError,
+а по контракту должна бросать ValueError.
+
+Исправьте ТОЛЬКО div(). Функции pct() и export_api() НЕ трогайте: они вне
+объёма этой задачи (их закрывают другие задачи). Проверьте себя точечно:
+`pytest test_calc.py::test_div` должен быть зелёным. Остальные тесты могут
+оставаться красными — это дефекты и нереализованные вещи ВНЕ объёма задачи.
+
+ТЕСТИРОВЩИКУ: если полный pytest красный только из-за вещей вне объёма
+этой задачи (pct() сломана, export_api() ещё не реализована) — оформите
+ОДИН bug-report через инструмент create_bug_report (в description: какие
+проверки падают, команда и вывод) и поставьте ЭТОЙ задаче
+set_verification(success=True): её собственный объём выполнен полностью.
+"""
+
+[[briefs]]
+title = "Реализуйте export_api()"
+kind = "feature"
+text = """
+Добавьте в calc.py функцию export_api(): она возвращает список имён
+публичных функций модуля в порядке их определения — ["div", "pct"].
+Реализации div и pct не менять. Проверка: `pytest test_export.py` должен
+быть зелёным.
+"""
+
+[settle]
+# The label of the briefs is not constrained here on purpose: the S2b
+# contract (queue priority, both briefs done, the bug task tested) is
+# asserted mechanically by checks.py.
+verification = "any"

@@ -1,0 +1,36 @@
+# S3 — компакция у кодера (план drcode-bench.md §7, этап 4 §12).
+#
+# Задача требует прочитать ВСЕ модули каталога glossary/ (18 файлов с
+# развёрнутыми определениями) — при max_context_tokens≈3000 у КОДИНГОВОЙ
+# модели (combo-фактор "s3-coder-small-ctx": переопределение
+# coding_max_context_tokens в записи каталога, §1.2) этого достаточно,
+# чтобы выжать контекст и вызвать компакцию: mid-run (pause →
+# sanitized_messages → unfinished=True → summary → continuation-turn) или
+# на границе turn'ов (_maybe_compact). Оба пути легитимны; факт компакции
+# проверяет checks.py, путь фиксируется в metrics.json.
+
+id = "s3_compaction_coder"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Измените вес термина kappa на 42 (каталог glossary/)"
+kind = "feature"
+text = """
+В репозитории есть каталог glossary/ — 18 модулей, каждый определяет
+ровно один термин: константы TERM и WEIGHT.
+
+Правило работы: прежде чем что-либо менять, вы обязаны ПРОЧИТАТЬ КАЖДЫЙ
+модуль каталога glossary/ целиком инструментом read_file (полный обзор
+обязателен, выбирать модуль наугад или через grep нельзя — решение должно
+опираться на содержимое всех файлов). По ходу чтения запоминайте TERM и
+WEIGHT каждого модуля.
+
+Задача: найдите модуль термина "kappa" и измените его WEIGHT на 42.
+Все остальные модули каталога не трогайте, тесты не трогайте, новые файлы
+не добавляйте. Когда `pytest test_glossary.py` зелёный — работа закончена.
+"""
+
+[settle]
+# Settle-criterion supplement (§4): the target task must end COMPLETED
+# with the tester's PASSED label.
+verification = "passed"

@@ -46,8 +46,43 @@ compaction = "provider-a/qwen3-coder-30b"
 [[combo]]
 # Маленький контекст у кодинговой модели — порог компакции тестера в drcode
 # считается именно от кодинговой модели (план §1.2, §13), поэтому
-# «маленький контекст» всегда ставится кодеру.
+# «маленький контекст» всегда ставится кодеру. Здесь он задан отдельным
+# id модели в каталоге (qwen3-8b-small-ctx).
 name       = "compaction-pressure"
 coding     = "provider-b/qwen3-8b-small-ctx"
 tester     = "provider-b/qwen3-8b"
 compaction = "provider-b/qwen3-8b"
+
+[[combo]]
+# То же самое через ПЕРЕОПРЕДЕЛЕНИЕ на роль из combo (план §1.2, этап 4):
+# coding_max_context_tokens записывается в entry каталога models.json —
+# слой, перекрывающий flat config для роли; env (DRCODE_MAX_CONTEXT_TOKENS)
+# не нужен и в прогоне всё равно вычищается (§13).
+name       = "s3-coder-small-ctx"
+coding     = "provider-b/qwen3-8b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+coding_max_context_tokens = 3000
+
+[[combo]]
+# S4: маленький контекст — ТОЖЕ у кодера, даже когда тестируется компакция
+# тестера: порог тестера считается от конфига кодинговой модели (§1.2/§13).
+name       = "s4-tester-compaction"
+coding     = "provider-b/qwen3-8b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+coding_max_context_tokens = 3000
+
+[[combo]]
+# Деградационная combo (план §8, «слабый компактизатор»): компактизатор —
+# самая маленькая модель матрицы; summary ожидаемо хуже, возможны
+# «compaction failed» / повторные компакции. drcode обязан переживать это
+# без падения прогона (gate отключается, ран идёт несжатым) — бенчмарк
+# распознаёт состояние и отмечает его в отчёте (§1.2, §10). Полный
+# матричный раннер — следующий этап (§12 этап 5); пока combo для ручной
+# проверки: python -m bench.run_one <scenario> degradation-weak-compactor <run_dir>
+name       = "degradation-weak-compactor"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-a/qwen3-coder-30b"
+compaction = "provider-b/qwen3-8b-small-ctx"
+compaction_max_context_tokens = 4096

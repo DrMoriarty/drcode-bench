@@ -27,9 +27,16 @@ Inside this process:
        `drcode.agent_model.build_model` BEFORE the app is created (§5):
        every model request of every agent — coder, tester, compaction —
        is logged with latency and usage into `<run_dir>/model_log.jsonl`;
-    7. `bench.settle.wait_settle` polls the settle criterion; on failure
-       `dump_diagnostics` snapshots the run, `checks.py` of the scenario
-       runs afterwards and everything lands in `<run_dir>/result.json`.
+    7. the user simulator (§6, `bench.user_sim.UserSimulator`) runs as a
+       sibling asyncio task in the same loop: it auto-answers
+       clarifications, fires the scenario's followups and guards against
+       stuck tasks — every intervention lands in
+       `<run_dir>/user_sim.jsonl`;
+    8. `bench.settle.wait_settle` polls the settle criterion (the
+       simulator's scenario failures act as hard settle-blockers); after
+       settle the simulator is cancelled, `dump_diagnostics` snapshots a
+       failed run, `checks.py` of the scenario runs afterwards and
+       everything lands in `<run_dir>/result.json`.
 
 Exit code: 0 = settled (+ green checks.py when the scenario has one),
 1 = failed.
@@ -78,7 +85,17 @@ class RunReport:
     checks_ok: bool | None = None  # None = scenario has no checks.py
     checks_output: str = ""
     resolved_roles: dict[str, str] = field(default_factory=dict)
+    # Effective max_context_tokens per role (combo overrides applied,
+    # §1.2): S3/S4 assert the small coding context actually reached the
+    # role — the pre-flight (verify_resolution) fails the run otherwise,
+    # this record keeps the fact in the artifacts.
+    resolved_context_tokens: dict[str, int] = field(default_factory=dict)
     tasks: list[dict[str, object]] = field(default_factory=list)
+    # User simulator (§6): how many interventions it made and which
+    # scenario failures it recorded (report §10 must be able to tell
+    # "the model is dumb" from "the simulator intervened").
+    user_sim_actions: int = 0
+    user_sim_failures: list[str] = field(default_factory=list)
 
     def dump(self, run_dir: Path) -> Path:
         out = run_dir / "result.json"
@@ -184,6 +201,12 @@ async def run_benchmark(
         report.resolved_roles = verify_resolution(
             paths.workspace, paths.config_home, combo, matrix_path=matrix_path
         )
+        from .matrix import ROLES, effective_max_context, load_matrix
+
+        providers, _ = load_matrix(matrix_path)
+        report.resolved_context_tokens = {
+            role: effective_max_context(combo, providers, role) for role in ROLES
+        }
     except EnvSetupError as e:
         report.reason = f"pre-flight failed: {e}"
         report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -221,6 +244,7 @@ async def run_benchmark(
 
     targets = []
     settled_ok = False
+    sim = None
     try:
         async with app.run_test(size=APP_SIZE) as pilot:
             await pilot.pause()
@@ -236,15 +260,43 @@ async def run_benchmark(
             _kick_pipeline(app)
             await pilot.pause()
 
-            # 5. Settle detection (§4). The user simulator (§6, stage 3)
-            #    will run as a sibling asyncio task here.
-            result = await wait_settle(
-                app, scenario, pilot, timeout=scenario.timeout_seconds, targets=targets
+            # 5. The user simulator (§6): a sibling asyncio task in the
+            #    same loop, polling app.manager and mutating ONLY through
+            #    the public TaskManager API. Every intervention is
+            #    appended to <run_dir>/user_sim.jsonl.
+            from .user_sim import UserSimulator
+
+            sim = UserSimulator(
+                app, scenario, targets, run_dir / "user_sim.jsonl"
             )
-            settled_ok = result.ok
-            report.reason = result.reason
-            report.timed_out = result.timed_out
-            report.settle_elapsed_s = result.elapsed_s
+            sim_task = asyncio.create_task(sim.run(), name="bench-user-sim")
+            try:
+                # 6. Settle detection (§4). The simulator's scenario
+                #    failures (e.g. an unanswered clarification, §6 p.1)
+                #    act as hard settle-blockers: a run that can no longer
+                #    succeed must not burn the whole scenario timeout.
+                result = await wait_settle(
+                    app,
+                    scenario,
+                    pilot,
+                    timeout=scenario.timeout_seconds,
+                    targets=targets,
+                    extra_blocker=sim.failure_reason,
+                )
+                settled_ok = result.ok
+                report.reason = result.reason
+                report.timed_out = result.timed_out
+                report.settle_elapsed_s = result.elapsed_s
+            finally:
+                # §4 skeleton: the simulator is cancelled right after
+                # settle (or if the settle wait itself crashed).
+                sim_task.cancel()
+                try:
+                    await sim_task
+                except asyncio.CancelledError:
+                    pass
+                report.user_sim_actions = sim.actions
+                report.user_sim_failures = list(sim.failures)
     except Exception as e:  # noqa: BLE001 - any crash is a failed run
         report.reason = f"app crashed: {type(e).__name__}: {e}"
 
@@ -253,8 +305,16 @@ async def run_benchmark(
 
     if settled_ok and report.checks_ok is False:
         report.reason = f"settled but checks.py failed:\n{report.checks_output}"
+    if sim is not None and sim.failures and settled_ok:
+        # The simulator recorded scenario failures (§6) even though the
+        # pipeline reached a quiet state: the run is still a failure.
+        report.reason = (
+            f"settled but the user simulator failed: {'; '.join(sim.failures)}"
+        )
 
-    report.ok = settled_ok and report.checks_ok is not False
+    report.ok = (
+        settled_ok and report.checks_ok is not False and not (sim and sim.failures)
+    )
     report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     if not report.ok:
@@ -307,6 +367,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"run:      {report.run_dir}")
     print(f"scenario: {report.scenario}  combo: {report.combo}")
+    if report.resolved_context_tokens:
+        ctx = ", ".join(
+            f"{role}={n}" for role, n in sorted(report.resolved_context_tokens.items())
+        )
+        print(f"context:  max_context_tokens per role: {ctx}")
     print(f"result:   {'OK' if report.ok else 'FAILED'} — {report.reason}")
     for t in report.tasks:
         print(
@@ -315,6 +380,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     if report.checks_ok is not None:
         print(f"checks.py: {'green' if report.checks_ok else 'RED'}")
+    if report.user_sim_actions or report.user_sim_failures:
+        print(
+            f"user sim: {report.user_sim_actions} intervention(s) "
+            f"({run_dir / 'user_sim.jsonl'})"
+        )
+        for failure in report.user_sim_failures:
+            print(f"  sim failure: {failure}")
     if not report.ok:
         print(f"diagnostics: {run_dir / 'diagnostics'}")
     return 0 if report.ok else 1

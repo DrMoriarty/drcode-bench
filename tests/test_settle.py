@@ -131,6 +131,31 @@ async def test_wait_settle_timeout_is_failure_not_exception() -> None:
     assert "timeout" in result.reason and "stuck" in result.reason
 
 
+async def test_wait_settle_extra_blocker_hard_failure() -> None:
+    """§6: a simulator-recorded scenario failure (e.g. an unanswered
+    clarification) is a HARD failure — settle stops immediately instead
+    of burning the scenario timeout."""
+    task = completed(VerificationStatus.PASSED)
+    app = make_app(task)
+    result = await wait_settle(
+        app, make_scenario(verification="passed"), FakePilot(), timeout=5.0,
+        targets=[task], poll_seconds=0.01,
+        extra_blocker=lambda: "no answer for the clarifying question",
+    )
+    assert not result.ok and not result.timed_out
+    assert "no answer" in result.reason
+
+
+async def test_wait_settle_extra_blocker_none_is_no_objection() -> None:
+    task = completed(VerificationStatus.PASSED)
+    app = make_app(task)
+    result = await wait_settle(
+        app, make_scenario(verification="passed"), FakePilot(), timeout=5.0,
+        targets=[task], poll_seconds=0.01, extra_blocker=lambda: None,
+    )
+    assert result.ok and not result.timed_out
+
+
 async def test_wait_settle_broken_app_is_error() -> None:
     app = SimpleNamespace(manager=None)
     try:

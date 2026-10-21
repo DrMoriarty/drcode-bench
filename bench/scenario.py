@@ -170,10 +170,17 @@ def _parse_followups(data: dict) -> tuple[Followup, ...]:
     out = []
     for i, f in enumerate(data.get("followups") or []):
         when = str(f.get("when", "elapsed"))
-        if when not in ("verification_failed", "elapsed", "event") and not when.startswith(
+        if when not in ("verification_failed", "elapsed") and not when.startswith(
             "event:"
         ):
-            raise ScenarioError(f"followups[{i}]: unsupported when={when!r}")
+            # Bare "event" is rejected on purpose: without a needle it can
+            # never fire, and a silently dead followup is worse than a
+            # loud load error (plan §6 p.2: condition = failed verdict /
+            # elapsed / event:<needle>).
+            raise ScenarioError(
+                f"followups[{i}]: unsupported when={when!r} — use "
+                "'verification_failed', 'elapsed' or 'event:<needle>'"
+            )
         after = f.get("after_minutes")
         if when == "elapsed" and after is None:
             raise ScenarioError(f"followups[{i}]: when='elapsed' needs after_minutes")

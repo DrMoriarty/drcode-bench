@@ -43,7 +43,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from .matrix import Combo, ProviderSpec, ROLES, _resolve_api_key, load_matrix, parse_ref
+from .matrix import (
+    Combo,
+    ProviderSpec,
+    ROLES,
+    _resolve_api_key,
+    effective_max_context,
+    load_matrix,
+    parse_ref,
+)
 
 # `task_finalization` values allowed for a benchmark run. "none" is not
 # useful here (the benchmark exists to exercise the tester).
@@ -97,6 +105,94 @@ def subprocess_env(config_home: Path, *, home: Path | None = None) -> dict[str, 
 # -- config file generation -----------------------------------------------------
 
 
+def materialize_providers(
+    combo: Combo,
+    providers: dict[str, ProviderSpec],
+) -> tuple[dict[str, ProviderSpec], dict[str, tuple[str, str]]]:
+    """Apply the combo's per-role `max_context_tokens` overrides (§1.2) to
+    the provider catalog and return the materialized providers plus the
+    effective role refs.
+
+    - No override (or an override equal to the catalog value): the role
+      keeps its original ref — the happy path of every non-compaction
+      combo.
+    - An override on a (provider, model) pair NOT shared with a role that
+      needs a different value: the catalog entry is patched in place —
+      `providers.resolve` copies `max_context_tokens` from the entry into
+      the role's config, which beats the flat config (§1.2).
+    - A CONFLICT (same provider+model referenced by roles needing different
+      values): the overridden role is re-pointed at a virtual provider
+      `<name>--ctx<N>` — same base_url/api_key, single model entry with the
+      overridden context. Model ids stay untouched so the run reports the
+      model the combo asked for.
+
+    The point of the whole mechanism: compaction scenarios S3/S4 set a
+    SMALL context on the coding model WITHOUT touching `DRCODE_*` env
+    (which the run hygiene strips anyway, §13) — the override travels in
+    the generated models.json, the layer drcode itself honors per role.
+    """
+    refs: dict[str, tuple[str, str]] = {}
+    wants: dict[tuple[str, str], dict[int, list[str]]] = {}
+    for role in ROLES:
+        provider_name, model_id = parse_ref(
+            combo.ref(role), f"combo '{combo.name}' role {role}"
+        )
+        refs[role] = (provider_name, model_id)
+        ctx = effective_max_context(combo, providers, role)
+        wants.setdefault((provider_name, model_id), {}).setdefault(ctx, []).append(role)
+
+    out = {name: providers[name] for name in providers}
+    for (provider_name, model_id), by_ctx in wants.items():
+        if len(by_ctx) == 1:
+            (ctx, _) = next(iter(by_ctx.items()))
+            spec = out[provider_name]
+            model = spec.model(model_id)
+            if model.max_context_tokens != ctx:
+                out[provider_name] = _spec_with_model(spec, model, ctx)
+            continue
+        # Conflict: the first role group in ROLES order wins the original
+        # provider (its entry patched to that group's effective ctx), the
+        # other groups get clones and their refs are rewritten.
+        kept_ctx = min(
+            by_ctx, key=lambda ctx: min(ROLES.index(r) for r in by_ctx[ctx])
+        )
+        spec = out[provider_name]
+        model = spec.model(model_id)
+        if model.max_context_tokens != kept_ctx:
+            out[provider_name] = _spec_with_model(spec, model, kept_ctx)
+        for ctx, roles in by_ctx.items():
+            if ctx == kept_ctx:
+                continue
+            clone_name = f"{provider_name}--ctx{ctx}"
+            suffix = 2
+            while clone_name in out and clone_name != provider_name:
+                clone_name = f"{provider_name}--ctx{ctx}-{suffix}"
+                suffix += 1
+            out[clone_name] = _spec_with_model(spec, spec.model(model_id), ctx, clone_name)
+            for role in roles:
+                refs[role] = (clone_name, model_id)
+    return out, refs
+
+
+def _spec_with_model(
+    spec: ProviderSpec,
+    model: object,
+    max_context_tokens: int,
+    name: str | None = None,
+) -> ProviderSpec:
+    """A copy of `spec` whose entry for `model.id` carries the given
+    max_context_tokens (single-model copy when `name` is given — the
+    virtual-provider form)."""
+    from dataclasses import replace
+
+    new_model = replace(model, max_context_tokens=max_context_tokens)  # type: ignore[arg-type]
+    if name is None:
+        models = dict(spec.models)
+        models[model.id] = new_model  # type: ignore[index]
+        return replace(spec, models=models)
+    return replace(spec, name=name, models={model.id: new_model})  # type: ignore[dict-item]
+
+
 def _providers_for_combo(
     combo: Combo,
     providers: dict[str, ProviderSpec] | None,
@@ -128,7 +224,11 @@ def build_catalog(
 ) -> dict[str, object]:
     """models.json payload for the combo (format: drcode `UserModelsConfig`,
     see `models.json.example` of drcode). api_key = "env:NAME" is resolved
-    from the host environment here."""
+    from the host environment here.
+
+    `providers` must already carry the combo's per-role context overrides
+    (`materialize_providers`) — the catalog entry is the layer that beats
+    the flat config for a role (§1.2)."""
     out_providers = []
     for name in sorted(providers):
         spec = providers[name]
@@ -254,10 +354,15 @@ def prepare_run(
     # `.drcode/` holds run-local task storage — never part of the seed commit.
     (workspace / ".gitignore").write_text(".drcode/\n", encoding="utf-8")
 
-    # 2. user-level catalog of this combo.
+    # 2. user-level catalog of this combo, with the per-role
+    #    max_context_tokens overrides written INTO the catalog entries
+    #    (§1.2: the catalog entry beats the flat config for a role; §13:
+    #    never via DRCODE_* env). Conflicting overrides on one model get a
+    #    virtual provider clone; `refs` holds the effective role refs.
     used_providers = _providers_for_combo(combo, providers, matrix_path)
+    catalog_providers, refs = materialize_providers(combo, used_providers)
     models_catalog = _write_json(
-        user_drcode_dir / "models.json", build_catalog(used_providers, combo)
+        user_drcode_dir / "models.json", build_catalog(catalog_providers, combo)
     )
 
     # 3. project-level per-role selection (+ flat layer). The flat layer
@@ -267,10 +372,8 @@ def prepare_run(
     #    dialog. The per-role "models" key still wins for every role via
     #    providers.resolve (env > project models > catalog default > flat),
     #    so the flat values here are just the coding baseline.
-    coding_provider_name, coding_model_id = parse_ref(
-        combo.coding, f"combo '{combo.name}' role coding"
-    )
-    coding_spec = used_providers[coding_provider_name]
+    coding_provider_name, coding_model_id = refs["coding"]
+    coding_spec = catalog_providers[coding_provider_name]
     coding_model = coding_spec.model(coding_model_id)
     flat = {
         "model": coding_model.id,
@@ -286,7 +389,7 @@ def prepare_run(
     flat = {k: v for k, v in flat.items() if v is not None}
     project_config = _write_json(
         workspace / PROJECT_STATE_DIRNAME / "drcode.json",
-        {**flat, "models": combo.roles()},
+        {**flat, "models": {role: f"{p}/{m}" for role, (p, m) in refs.items()}},
     )
 
     # 4. project settings: no watchdog, no retention cleanup, testing
@@ -360,15 +463,21 @@ def verify_resolution(
     matrix_path: Path | None = None,
 ) -> dict[str, str]:
     """Pre-flight: resolve each role against the generated config and assert
-    the expected model. Returns role → "provider/model" as resolved.
+    the expected model AND the expected max_context_tokens (the compaction
+    scenarios live or die by the small coding context, §1.2). Returns
+    role → "provider/model" as resolved.
 
     Uses `drcode.providers.resolve()` — the same precedence (env >
-    project models > catalog defaults > flat config) the run will see.
+    project models > catalog defaults > flat config) the run will see;
+    the expected refs/values come from `materialize_providers`, i.e. the
+    combo's per-role overrides included.
     """
     if providers is None:
         if matrix_path is None:
             matrix_path = Path(__file__).resolve().parents[1] / "matrix.toml"
         providers, _ = load_matrix(matrix_path)
+
+    catalog_providers, refs = materialize_providers(combo, providers)
 
     import drcode.providers as dproviders
     from drcode.config import Config
@@ -379,15 +488,22 @@ def verify_resolution(
         for role in ROLES:
             agent_role = dproviders.AgentRole(role)
             eff = dproviders.resolve(config, agent_role)
-            ref = combo.ref(role)
-            provider_name, model_id = ref.partition("/")[0], ref.partition("/")[2]
-            spec = providers[provider_name].model(model_id)
-            expected_base_url = providers[provider_name].base_url
+            provider_name, model_id = refs[role]
+            spec = catalog_providers[provider_name]
+            model = spec.model(model_id)
+            expected_base_url = spec.base_url
             if eff.model != model_id or eff.base_url != expected_base_url:
                 raise EnvSetupError(
                     f"pre-flight failed for role '{role}': expected "
                     f"{model_id}@{expected_base_url}, resolved "
                     f"{eff.model}@{eff.base_url}"
+                )
+            if eff.max_context_tokens != model.max_context_tokens:
+                raise EnvSetupError(
+                    f"pre-flight failed for role '{role}': resolved "
+                    f"max_context_tokens={eff.max_context_tokens}, expected "
+                    f"{model.max_context_tokens} (combo override + catalog "
+                    "entry must reach the role)"
                 )
             resolved[role] = f"{provider_name}/{eff.model}"
     return resolved
@@ -414,6 +530,9 @@ def run_preflight_subprocess(
                 "coding": combo.coding,
                 "tester": combo.tester,
                 "compaction": combo.compaction,
+                "max_context_overrides": [
+                    [role, value] for role, value in combo.max_context_overrides
+                ],
             },
             "matrix_path": str(matrix_path) if matrix_path else None,
         }
@@ -444,6 +563,10 @@ def _preflight_main() -> int:
         coding=spec["combo"]["coding"],
         tester=spec["combo"]["tester"],
         compaction=spec["combo"]["compaction"],
+        max_context_overrides=tuple(
+            (role, int(value))
+            for role, value in spec["combo"].get("max_context_overrides") or ()
+        ),
     )
     matrix_path = Path(spec["matrix_path"]) if spec.get("matrix_path") else None
     # XDG_CONFIG_HOME of this process IS the run's config-home; drcode.config

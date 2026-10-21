@@ -261,3 +261,148 @@ def test_run_preflight_subprocess(scenario_dir, combo, matrix_file, tmp_path):
         "compaction": "fake-b/small-8b",
     }
     assert sys.prefix  # sanity: tests run inside the bench venv
+
+
+# -- per-role max_context_tokens overrides (plan §1.2, stage 4) ------------------
+
+OVERRIDE_MATRIX = """\
+[providers.fake-a]
+base_url = "http://fake-a.local:9000/v1"
+api_key  = ""
+
+[providers.fake-a.models.big-coder]
+max_context_tokens = 32768
+max_tokens = 4096
+
+[providers.fake-b]
+base_url = "http://fake-b.local:9001/v1"
+api_key  = ""
+
+[providers.fake-b.models.small-8b]
+max_context_tokens = 8192
+max_tokens = 2048
+
+[[combo]]
+name       = "small-coding-ctx"
+coding     = "fake-a/big-coder"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+coding_max_context_tokens = 3000
+
+[[combo]]
+name       = "conflicting-overrides"
+coding     = "fake-b/small-8b"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+coding_max_context_tokens = 2000
+compaction_max_context_tokens = 5000
+"""
+
+
+@pytest.fixture
+def override_matrix_file(tmp_path: Path) -> Path:
+    path = tmp_path / "matrix.toml"
+    path.write_text(OVERRIDE_MATRIX, encoding="utf-8")
+    return path
+
+
+def test_matrix_parses_max_context_overrides(override_matrix_file: Path) -> None:
+    _, combos = load_matrix(override_matrix_file)
+    small, conflict = combos
+    assert small.max_context_override("coding") == 3000
+    assert small.max_context_override("tester") is None
+    assert conflict.max_context_override("coding") == 2000
+    assert conflict.max_context_override("compaction") == 5000
+
+
+def test_materialize_patches_catalog_entry_in_place(
+    override_matrix_file: Path, tmp_path: Path
+) -> None:
+    """No conflict (distinct models): the override lands on the referenced
+    catalog entry — the layer that beats the flat config for the role."""
+    from bench.env_setup import materialize_providers
+
+    providers, _ = load_matrix(override_matrix_file)
+    small = load_matrix(override_matrix_file)[1][0]
+    materialized, refs = materialize_providers(small, providers)
+    assert refs["coding"] == ("fake-a", "big-coder")
+    assert (
+        materialized["fake-a"].model("big-coder").max_context_tokens == 3000
+    )
+    # Untouched roles keep their values.
+    assert (
+        materialized["fake-b"].model("small-8b").max_context_tokens == 8192
+    )
+
+
+def test_materialize_resolves_conflict_with_virtual_provider(
+    override_matrix_file: Path,
+) -> None:
+    """Same model referenced by roles needing different contexts: the first
+    role in ROLES order keeps the original provider (patched), the others
+    get `<name>--ctx<N>` clones with identical base_url."""
+    from bench.env_setup import materialize_providers
+
+    providers, combos = load_matrix(override_matrix_file)
+    conflict = combos[1]
+    materialized, refs = materialize_providers(conflict, providers)
+    # The first role in ROLES order (coding, ctx 2000) keeps the original
+    # provider, patched.
+    assert refs["coding"] == ("fake-b", "small-8b")
+    assert materialized["fake-b"].model("small-8b").max_context_tokens == 2000
+    clone_name = refs["compaction"][0]
+    assert clone_name.startswith("fake-b--ctx")
+    clone = materialized[clone_name]
+    assert clone.base_url == providers["fake-b"].base_url
+    assert clone.model("small-8b").max_context_tokens == 5000
+    # The tester (no override → catalog 8192 ≠ kept 2000) gets its own
+    # clone with the catalog value.
+    tester_clone = materialized[refs["tester"][0]]
+    assert tester_clone.model("small-8b").max_context_tokens == 8192
+
+
+def test_prepare_run_writes_override_into_catalog(
+    override_matrix_file: Path, scenario_dir: Path, tmp_path: Path
+) -> None:
+    _, combos = load_matrix(override_matrix_file)
+    small = next(c for c in combos if c.name == "small-coding-ctx")
+    paths = prepare_run(
+        scenario_dir, small, tmp_path / "runs" / "ovr", matrix_path=override_matrix_file
+    )
+    catalog = json.loads(paths.models_catalog.read_text(encoding="utf-8"))
+    fake_a = next(p for p in catalog["providers"] if p["name"] == "fake-a")
+    assert next(m for m in fake_a["models"] if m["id"] == "big-coder")[
+        "max_context_tokens"
+    ] == 3000
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    assert project["models"]["coding"] == "fake-a/big-coder"
+
+
+def test_verify_resolution_asserts_context_override(
+    override_matrix_file: Path, scenario_dir: Path, tmp_path: Path
+) -> None:
+    """The pre-flight must catch a run where the small context did NOT
+    reach the role — the compaction scenarios would silently run with the
+    big window otherwise."""
+    _, combos = load_matrix(override_matrix_file)
+    small = next(c for c in combos if c.name == "small-coding-ctx")
+    paths = prepare_run(
+        scenario_dir, small, tmp_path / "runs" / "pf", matrix_path=override_matrix_file
+    )
+    resolved = verify_resolution(
+        paths.workspace, paths.config_home, small, matrix_path=override_matrix_file
+    )
+    assert resolved["coding"] == "fake-a/big-coder"
+
+    # Sabotage: restore the big context in the generated catalog — the
+    # pre-flight must fail.
+    catalog = json.loads(paths.models_catalog.read_text(encoding="utf-8"))
+    for p in catalog["providers"]:
+        for m in p["models"]:
+            if m["id"] == "big-coder":
+                m["max_context_tokens"] = 32768
+    paths.models_catalog.write_text(json.dumps(catalog), encoding="utf-8")
+    with pytest.raises(EnvSetupError, match="max_context_tokens"):
+        verify_resolution(
+            paths.workspace, paths.config_home, small, matrix_path=override_matrix_file
+        )

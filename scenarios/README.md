@@ -55,5 +55,33 @@ S1 happy path · S2a bug→follow-up · S2b bug-report тестера · S3 ко
 у кодера · S4 компакция у тестера · S5 clarification · S6 очередь ·
 S7 fault injection (опция).
 
+Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**.
+
+## Компакционные сценарии S3/S4 (этап 4, план §1.2/§12)
+
+- «Маленький контекст» ставится **кодинговой** модели: либо отдельным id
+  модели в каталоге (`qwen3-8b-small-ctx`), либо переопределением на роль
+  из combo — `coding_max_context_tokens = 3000` в matrix.toml (попадает в
+  entry каталога models.json, который перекрывает flat config для роли;
+  env `DRCODE_MAX_CONTEXT_TOKENS` не используется и в прогоне вычищается).
+- S3: сид — каталог `glossary/` из 18 модулей, brief велит прочитать
+  каждый; assertions checks.py: событие «Context compacted», compaction
+  start (mid-run pause или turn boundary), `COMPACTION_SUMMARY_PREFIX`
+  в `messages`, исходный user-промпт дословно, задача COMPLETED/PASSED,
+  pytest зелёный.
+- S4: сид — `data/listing.txt` на 25 000 строк, brief велит «проверь
+  полный листинг» (run_bash с жирным stdout); assertions checks.py:
+  compaction-евент внутри testing-раунда, `tester_messages[-1]` содержит
+  summary, вердикт выставлен.
+- Источник порога тестера (§1.2/§13: конфиг КОДИНГОВОЙ модели) — объект
+  проверки: `metrics.json` классифицирует его
+  (`tester_threshold_from_coding`), отчёт помечает регрессию.
+- `metrics.json` также содержит: `repeat_compaction` (повторная компакция
+  — деградация после summary) и `compaction_failed`-евенты (в drcode
+  failure компакции never fatal: gate отключается, ран продолжается
+  несжатым; отчёт помечает это состояние).
+- Деградационная combo «слабого компактизатора» — `degradation-weak-compactor`
+  в matrix.toml (ручная проверка); полный матричный раннер — этап 5.
+
 Этап 1 — только скелет: сами сценарии наполняются по мере реализации
 этапов плана (§12).

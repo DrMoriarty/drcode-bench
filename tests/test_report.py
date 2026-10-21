@@ -158,3 +158,47 @@ def test_generate_report_reextracts_missing_metrics(tmp_path: Path) -> None:
     )
     generate_report(tmp_path / "runs")
     assert (run_dir / "metrics.json").is_file()
+
+
+def test_report_marks_compaction_failed_state(tmp_path: Path) -> None:
+    """§1.2/§10: 'compaction failed' is never fatal in drcode (the gate is
+    disabled, the run continues uncompressed) — the report must surface
+    that state explicitly, plus repeat compactions (degradation)."""
+    metrics = make_metrics(
+        "r-compfail",
+        "s3_compaction_coder",
+        "combo-a",
+        **{
+            "totals": {
+                "n_tasks": 1,
+                "n_compactions": 0,
+                "n_compactions_started": 1,
+                "n_repeat_compactions": 1,
+                "n_testing_rounds": 1,
+                "usage": {},
+                "stability": {"compaction_failed": 2},
+            },
+        },
+    )
+    _write_run(tmp_path, metrics)
+    out = generate_report(tmp_path)
+    report = out.read_text(encoding="utf-8")
+    assert "COMPACTION FAILED ×2" in report
+    assert "_compaction_failed" in report
+    assert "UNCOMPRESSED" in report
+    assert "Repeat compaction" in report
+
+
+def test_report_marks_tester_threshold_source(tmp_path: Path) -> None:
+    """§1.2/§13 (S4): the tester-threshold-source remark is rendered — and
+    a 'tester' classification is named a REGRESSION."""
+    ok = make_metrics("r-ttc-ok", "s4_compaction_tester", "combo-a")
+    ok["tester_threshold_from_coding"] = True
+    _write_run(tmp_path, ok)
+    reg = make_metrics("r-ttc-reg", "s4_compaction_tester", "combo-a")
+    reg["tester_threshold_from_coding"] = False
+    _write_run(tmp_path, reg)
+    out = generate_report(tmp_path)
+    report = out.read_text(encoding="utf-8")
+    assert "Tester compaction threshold source: coding" in report
+    assert "REGRESSION" in report

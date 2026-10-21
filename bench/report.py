@@ -148,6 +148,10 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             [(m.get("totals") or {}).get("n_compactions") for m in group]
         )
         rounds = _agg([(m.get("totals") or {}).get("n_testing_rounds") for m in group])
+        round_trips = _agg([len(m.get("bug_round_trips") or []) for m in group])
+        sim_interventions = _agg(
+            [(m.get("user_sim") or {}).get("interventions") for m in group]
+        )
         tokens = _agg(
             [
                 ((m.get("totals") or {}).get("usage") or {}).get("output_tokens")
@@ -166,6 +170,8 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "wall_time_s": wall,
                 "compactions": compactions,
                 "testing_rounds": rounds,
+                "bug_round_trips": round_trips,
+                "sim_interventions": sim_interventions,
                 "output_tokens": tokens,
                 "model_requests": requests,
                 "latency_ms_p50": latency_p50,
@@ -183,10 +189,11 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     lines = [
         "| scenario | combo | runs | verdicts | wall-time (median, s) | "
-        "compactions (med) | testing rounds (med) | output tokens (med) | "
+        "compactions (med) | testing rounds (med) | bug round-trips (med) | "
+        "sim interventions (med) | output tokens (med) | "
         "model requests (med) | latency p50/p95 (med, s) | "
         "tokens by role (med, prompt/compl.) | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
         wall = p["wall_time_s"]
@@ -208,6 +215,8 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             f"| {wall_str} "
             f"| {_fmt(p['compactions']['median'])} "
             f"| {_fmt(p['testing_rounds']['median'])} "
+            f"| {_fmt(p['bug_round_trips']['median'])} "
+            f"| {_fmt(p['sim_interventions']['median'])} "
             f"| {_fmt(p['output_tokens']['median'])} "
             f"| {_fmt(p['model_requests']['median'])} "
             f"| {lat_str} "
@@ -220,8 +229,8 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
 def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
     lines = [
         "| run | scenario | combo | verdict | wall-time | checks | compactions "
-        "(ok/started/failed) | testing rounds | tasks | stability | artifacts |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "(ok/started/failed) | testing rounds | sim interventions | tasks | stability | artifacts |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in runs:
         run_id = m.get("run_id") or "?"
@@ -235,6 +244,10 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
             f"{_fmt(comp.get('n_compactions'))}/{_fmt(comp.get('n_compactions_started'))}"
             f"/{_fmt(comp.get('stability', {}).get('compaction_failed'))}"
         )
+        sim = m.get("user_sim") or {}
+        sim_str = _fmt(sim.get("interventions"))
+        if sim.get("failures"):
+            sim_str += " ⚠"
         tasks = m.get("tasks") or []
         verdicts = "/".join(
             f"{t.get('kind')}:{t.get('verification') or t.get('status')}" for t in tasks
@@ -243,7 +256,7 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
             f"| {_fmt(m.get('verdict'))} | {_fmt(m.get('wall_time_s', {}).get('settle'), ' s')} "
             f"| {checks_str} | {comp_str} "
-            f"| {_fmt(comp.get('n_testing_rounds'))} | {verdicts} "
+            f"| {_fmt(comp.get('n_testing_rounds'))} | {sim_str} | {verdicts} "
             f"| {_stability_flags(m)} "
             f"| [metrics]({rel}/metrics.json) · [result]({rel}/result.json) |"
         )
@@ -272,6 +285,38 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
                 f"| {_fmt(ph.get('total_s'))} |"
             )
         lines.append("")
+        # Compaction health of the run (§1.2/§10): "compaction failed" is
+        # never fatal in drcode — the gate is disabled (`_compaction_failed`)
+        # and the run continues UNCOMPRESSED — but the benchmark must
+        # recognize and surface that state, plus repeat compactions (the
+        # summary did not stick → degradation signal).
+        comp_failed = (m.get("totals", {}).get("stability", {}) or {}).get(
+            "compaction_failed"
+        ) or 0
+        if comp_failed:
+            lines.append(
+                f"⚠ COMPACTION FAILED ×{comp_failed}: drcode disabled the "
+                "compaction gate (`_compaction_failed`) and the run "
+                "continued with the UNCOMPRESSED history — summaries may "
+                "be missing from the transcripts.\n"
+            )
+        if (m.get("totals") or {}).get("n_repeat_compactions"):
+            lines.append(
+                "⚠ Repeat compaction (§10): a context was compacted more "
+                "than once — degradation after the summary.\n"
+            )
+        ttc = m.get("tester_threshold_from_coding")
+        if ttc is not None:
+            flag = (
+                "as expected (§1.2/§13)"
+                if ttc
+                else "REGRESSION — threshold came from the tester model"
+            )
+            lines.append(
+                f"Tester compaction threshold source: {'coding' if ttc else 'NOT coding'} "
+                f"model config — {flag}."
+            )
+            lines.append("")
         savings = [
             s
             for t in m.get("tasks") or []
@@ -295,6 +340,18 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
             lines.append("Bug round-trips:\n")
             for b in m["bug_round_trips"]:
                 lines.append(f"- `{b['id']}` {b['title']} (activated {b['activated_at']})")
+            lines.append("")
+        sim = m.get("user_sim")
+        if sim:
+            by_action = ", ".join(
+                f"{action}: {n}" for action, n in sorted(sim.get("by_action", {}).items())
+            )
+            lines.append(
+                f"User-simulator interventions: {sim.get('interventions', 0)} "
+                f"({by_action or 'none'})"
+            )
+            for failure in sim.get("failures") or []:
+                lines.append(f"- SIM FAILURE: {failure}")
             lines.append("")
         model_log = m.get("model_log")
         if model_log:

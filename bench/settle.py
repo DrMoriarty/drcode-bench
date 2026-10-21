@@ -80,6 +80,7 @@ async def wait_settle(
     *,
     targets: list[Any] | None = None,
     poll_seconds: float = POLL_SECONDS,
+    extra_blocker: Any = None,
 ) -> SettleResult:
     """Poll the settle criterion until it holds or the (soft) timeout of
     the scenario expires (plan §4). The timeout expiring is a FAILURE of
@@ -88,6 +89,12 @@ async def wait_settle(
     `pilot` is the textual Pilot of `run_test()`; polling goes through
     `pilot.pause()` so the app keeps processing its message queue while
     we wait.
+
+    `extra_blocker` (used by the user simulator, §6): a callable returning
+    None (no objection) or a failure reason string. A non-None result is a
+    HARD scenario failure ("ответ не найден → провал сценария"): settle
+    stops immediately with ok=False instead of burning the whole scenario
+    timeout on a run that can no longer succeed.
     """
     targets = targets or []
     start = time.monotonic()
@@ -95,6 +102,15 @@ async def wait_settle(
     reason = "scenario timeout before the first settle check"
 
     while True:
+        if extra_blocker is not None:
+            hard = extra_blocker()
+            if hard:
+                return SettleResult(
+                    ok=False,
+                    reason=f"scenario failure: {hard}",
+                    elapsed_s=time.monotonic() - start,
+                    timed_out=False,
+                )
         try:
             reason = settle_blocker(app, scenario, targets)
         except Exception as e:  # noqa: BLE001 - a broken check is a run failure

@@ -31,6 +31,8 @@ What is extracted per run (into `runs/<run_id>/metrics.json`):
   drcode does not persist, §1.5);
 - testing rounds (`len(tester_messages)`) and bug round-trips (tasks
   with kind=bug and their activation times);
+- user-simulator interventions (§6, `user_sim.jsonl`): what the
+  simulator did and which scenario failures it recorded;
 - stability: "compaction failed" / "tester failed" / network retries /
   exclusion events / `unfinished` / pending clarification.
 
@@ -166,9 +168,29 @@ def user_prompt_content(msg: dict[str, Any]) -> str | None:
     return None
 
 
+def user_prompt_contents(msg: dict[str, Any]) -> list[str]:
+    """ALL string user-prompt contents of a serialized request. A request
+    can carry MORE than one: after a compaction + continuation turn the
+    persisted transcript merges the original brief and the synthetic
+    summary prompt into a single request (observed on-disk shape), so
+    summary detection must scan every part, not just the first."""
+    if not _is_request(msg):
+        return []
+    out = []
+    for part in msg.get("parts", []):
+        if isinstance(part, dict) and part.get("part_kind") == "user-prompt":
+            content = part.get("content")
+            if isinstance(content, str):
+                out.append(content)
+    return out
+
+
 def is_summary_message(msg: dict[str, Any]) -> bool:
-    content = user_prompt_content(msg)
-    return content is not None and content.startswith(COMPACTION_SUMMARY_PREFIX)
+    """True when the request carries the synthetic compaction-summary
+    prompt (any user-prompt part — see `user_prompt_contents`)."""
+    return any(
+        c.startswith(COMPACTION_SUMMARY_PREFIX) for c in user_prompt_contents(msg)
+    )
 
 
 def usage_of(msg: dict[str, Any]) -> dict[str, int] | None:
@@ -369,25 +391,34 @@ def analyze_compaction_savings(
     pending: dict[str, Any] | None = None
     prompts_before = 0
     for msg in messages:
-        if is_summary_message(msg):
-            body = user_prompt_content(msg) or ""
-            summary_body = body[len(COMPACTION_SUMMARY_PREFIX) :].strip()
-            trigger = None
-            summary_at = message_time(msg)
-            for ev in fill_events:
-                if ev.kind != "start":
-                    continue
-                if summary_at is None or ev.at is None or ev.at <= summary_at:
-                    trigger = ev.trigger_pct
-            pending = {
-                "at": dt_or(summary_at),
-                "summary_chars": len(summary_body),
-                "prompts_kept": prompts_before,
-                "pre_tokens_est": last_usage["context_tokens"] if last_usage else None,
-                "post_tokens_est": None,
-                "saved_tokens_est": None,
-                "trigger_pct": trigger,
-            }
+        # A request can carry several user-prompt parts (the persisted
+        # transcript merges the original brief and the summary prompt into
+        # one request after a compaction + continuation turn) — walk the
+        # parts in order.
+        if _is_request(msg):
+            for content in user_prompt_contents(msg):
+                if content.startswith(COMPACTION_SUMMARY_PREFIX):
+                    summary_body = content[len(COMPACTION_SUMMARY_PREFIX) :].strip()
+                    trigger = None
+                    summary_at = message_time(msg)
+                    for ev in fill_events:
+                        if ev.kind != "start":
+                            continue
+                        if summary_at is None or ev.at is None or ev.at <= summary_at:
+                            trigger = ev.trigger_pct
+                    pending = {
+                        "at": dt_or(summary_at),
+                        "summary_chars": len(summary_body),
+                        "prompts_kept": prompts_before,
+                        "pre_tokens_est": (
+                            last_usage["context_tokens"] if last_usage else None
+                        ),
+                        "post_tokens_est": None,
+                        "saved_tokens_est": None,
+                        "trigger_pct": trigger,
+                    }
+                else:
+                    prompts_before += 1
             continue
         if pending is not None and _is_response(msg):
             usage = usage_of(msg)
@@ -399,8 +430,6 @@ def analyze_compaction_savings(
                     )
                 savings.append(pending)
                 pending = None
-        if _is_request(msg) and user_prompt_content(msg) is not None:
-            prompts_before += 1
         if _is_response(msg):
             last_usage = usage_of(msg) or last_usage
     # A summary as the very last message (compacted right before the run
@@ -426,11 +455,313 @@ def analyze_testing(task: dict[str, Any]) -> dict[str, Any]:
     return {"n_rounds": len(rounds), "rounds": rounds}
 
 
-def analyze_task(task: dict[str, Any]) -> dict[str, Any]:
-    """Full per-task metrics block (see the module docstring)."""
+# --- tester compaction threshold source (§1.2/§13, scenario S4) ------------
+
+
+def read_context_limits(run_dir: Path) -> dict[str, int]:
+    """Effective max_context_tokens per role for a run dir (best effort,
+    §1.2): `result.json.resolved_context_tokens` when the harness recorded
+    it, otherwise reconstructed from the generated configs the way
+    `providers.resolve` reads them (project `models` refs → catalog entry,
+    flat config as the coding fallback). Empty dict = unknown."""
+    run_dir = Path(run_dir)
+
+    result: dict[str, Any] = {}
+    result_path = run_dir / "result.json"
+    if result_path.is_file():
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result = {}
+    recorded = result.get("resolved_context_tokens")
+    if isinstance(recorded, dict) and recorded:
+        return {str(k): int(v) for k, v in recorded.items() if isinstance(v, (int, float))}
+
+    # Fallback: parse the generated configs. The state dir lives in the
+    # workspace (or its diagnostics copy for failed runs).
+    for state_dir in (
+        run_dir / "workspace" / ".drcode",
+        run_dir / "diagnostics" / "drcode-state",
+    ):
+        project_file = state_dir / "drcode.json"
+        catalog_file = run_dir / "config-home" / "drcode" / "models.json"
+        if not project_file.is_file() or not catalog_file.is_file():
+            continue
+        try:
+            project = json.loads(project_file.read_text(encoding="utf-8"))
+            catalog = json.loads(catalog_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        entries: dict[tuple[str, str], int] = {}
+        providers_by_name: dict[str, str] = {}
+        for p in catalog.get("providers") or []:
+            providers_by_name[p.get("name")] = p.get("base_url", "")
+            for m in p.get("models") or []:
+                entries[(p.get("name"), m.get("id"))] = int(
+                    m.get("max_context_tokens") or 0
+                )
+        refs = project.get("models") or {}
+        limits: dict[str, int] = {}
+        for role, ref in refs.items():
+            provider_name, _, model_id = str(ref).partition("/")
+            ctx = entries.get((provider_name, model_id))
+            if ctx:
+                limits[role] = ctx
+        if "coding" not in limits and isinstance(
+            project.get("max_context_tokens"), int
+        ):
+            limits["coding"] = int(project["max_context_tokens"])
+        if limits:
+            return limits
+    return {}
+
+
+def _round_tokens_before_summary(rnd: list[dict[str, Any]]) -> int | None:
+    """Context size (input tokens) the tester had accumulated right before
+    the round's summary message: the last completed response before it.
+
+    Only works when the pre-compaction tail of the round survived in the
+    persisted transcript; the common mid-round path REPLACES the round
+    with prompt + summary + continuation (the pre-compaction responses are
+    gone) — then the recorder log is the token source
+    (`_recorder_tokens_before`)."""
+    last: int | None = None
+    for msg in rnd:
+        if is_summary_message(msg):
+            break
+        if _is_response(msg):
+            usage = usage_of(msg)
+            if usage:
+                last = usage["input_tokens"]
+    return last
+
+
+def _recorder_tokens_before(
+    entries: list[dict[str, Any]],
+    tester_tag: str | None,
+    at: datetime | None,
+    *,
+    window_s: float = 300.0,
+) -> int | None:
+    """Largest reported input_tokens among the tester's recorder entries in
+    the window before `at` — the context size the tester had accumulated
+    when the compaction gate fired (the recorder logs every request with
+    the history it carried, §5)."""
+    if not entries or not tester_tag or at is None:
+        return None
+    t = at.timestamp()
+    best = 0
+    for rec in entries:
+        if rec.get("role") != tester_tag or rec.get("error"):
+            continue
+        usage = rec.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        tokens = int(usage.get("input_tokens") or 0)
+        if not tokens:
+            continue
+        rec_t = rec.get("ts")
+        rec_t = float(rec_t) if isinstance(rec_t, (int, float)) else None
+        if rec_t is None or not (t - window_s <= rec_t <= t + 5):
+            continue
+        best = max(best, tokens)
+    return best or None
+
+
+def _tester_role_tag(run_dir: Path) -> str | None:
+    """The recorder role tag of the tester agent (`f"{model}@{base_url}"`,
+    §5), reconstructed from the generated configs. None when the configs
+    are unreadable."""
+    for state_dir in (
+        run_dir / "workspace" / ".drcode",
+        run_dir / "diagnostics" / "drcode-state",
+    ):
+        project_file = state_dir / "drcode.json"
+        catalog_file = run_dir / "config-home" / "drcode" / "models.json"
+        if not project_file.is_file() or not catalog_file.is_file():
+            continue
+        try:
+            project = json.loads(project_file.read_text(encoding="utf-8"))
+            catalog = json.loads(catalog_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        ref = (project.get("models") or {}).get("tester")
+        if not ref:
+            return None
+        provider_name, _, model_id = str(ref).partition("/")
+        for p in catalog.get("providers") or []:
+            if p.get("name") == provider_name:
+                return f"{model_id}@{p.get('base_url', '')}"
+    return None
+
+
+def analyze_tester_threshold(
+    raw_task: dict[str, Any],
+    limits: dict[str, int],
+    *,
+    log_entries: list[dict[str, Any]] | None = None,
+    tester_tag: str | None = None,
+) -> dict[str, Any] | None:
+    """Which model's context limit drove the tester's compactions (§1.2/§13).
+
+    drcode computes the tester's compaction threshold from the CODING
+    model's config (`_fill_over_threshold` uses the coding role) — the
+    benchmark must verify that behavior, not assume it. From the artifacts
+    the denominator is recoverable indirectly: a round that was compacted
+    at trigger_pct with a pre-compaction token estimate T implies an
+    effective limit T / pct * 100 — nearest to the coding limit means the
+    threshold indeed came from the coding model, nearest to the (typically
+    much larger) tester limit would mean drcode regressed. The token
+    estimate comes from the round transcript when its pre-compaction tail
+    survived, otherwise from the recorder log (§5).
+
+    When coding and tester limits COINCIDE the classification is moot —
+    it is reported as 'coding' (no regression possible). `raw_task` is
+    the unparsed task JSON. None = no tester-phase compaction to classify."""
+    events = parse_events(raw_task.get("events") or [])
+    tester_starts = [
+        e for e in events.compactions
+        if e.phase == "tester" and e.kind == "start"
+    ]
+    if not tester_starts:
+        return None
+    coding = limits.get("coding")
+    tester = limits.get("tester")
+    moot = coding is not None and (tester is None or tester <= coding)
+
+    observations: list[dict[str, Any]] = []
+    sources: set[str] = set()
+    classified = False
+    for i, rnd in enumerate(raw_task.get("tester_messages") or []):
+        summary = next((m for m in rnd if is_summary_message(m)), None)
+        if summary is None:
+            continue
+        tokens = _round_tokens_before_summary(rnd)
+        summary_at = message_time(summary)
+        trigger = next(
+            (
+                e.trigger_pct
+                for e in reversed(tester_starts)
+                if e.trigger_pct is not None
+                and summary_at is not None
+                and e.at is not None
+                and e.at <= summary_at
+            ),
+            None,
+        )
+        if tokens is None:
+            # The mid-round compaction replaced the round in place: the
+            # pre-compaction responses are gone from the transcript —
+            # take the context size from the recorder log (§5).
+            start_at = next(
+                (e.at for e in reversed(tester_starts) if trigger is not None and e.trigger_pct == trigger),
+                None,
+            )
+            tokens = _recorder_tokens_before(log_entries or [], tester_tag, start_at)
+        implied = round(tokens * 100 / trigger) if tokens and trigger else None
+        source = "unknown"
+        if moot:
+            source = "coding"  # thresholds coincide — no regression possible
+            classified = True
+        elif implied is not None and coding:
+            classified = True
+            source = (
+                "coding"
+                if abs(implied - coding) <= abs(implied - tester)
+                else "tester"
+            )
+        sources.add(source)
+        observations.append(
+            {
+                "round": i,
+                "trigger_pct": trigger,
+                "pre_tokens_est": tokens,
+                "implied_max_context_tokens": implied,
+                "source": source,
+            }
+        )
+    if not observations:
+        # Compaction started but never produced a summary (failed): the
+        # source cannot be classified from transcripts — events only.
+        for e in tester_starts:
+            tokens = _recorder_tokens_before(log_entries or [], tester_tag, e.at)
+            implied = (
+                round(tokens * 100 / e.trigger_pct)
+                if tokens and e.trigger_pct
+                else None
+            )
+            source = "unknown"
+            if moot:
+                source, classified = "coding", True
+            elif implied is not None and coding and tester and tester > coding:
+                classified = True
+                source = (
+                    "coding"
+                    if abs(implied - coding) <= abs(implied - tester)
+                    else "tester"
+                )
+            sources.add(source)
+            observations.append(
+                {
+                    "round": None,
+                    "trigger_pct": e.trigger_pct,
+                    "pre_tokens_est": tokens,
+                    "implied_max_context_tokens": implied,
+                    "source": source,
+                }
+            )
+    if "tester" in sources or "mixed" in sources:
+        source = "tester" if sources == {"tester"} else "mixed"
+    elif "coding" in sources:
+        source = "coding"
+    else:
+        source = "unknown"
+    return {
+        "coding_max_context_tokens": coding,
+        "tester_max_context_tokens": tester,
+        "source": source,
+        "classified": classified,
+        "observations": observations,
+        "remark": (
+            "drcode computes the tester compaction threshold from the "
+            "CODING model's config (§1.2/§13) — 'coding' is the expected "
+            "classification; 'tester' would be a regression."
+        ),
+    }
+
+
+def analyze_task(
+    task: dict[str, Any],
+    *,
+    context_limits: dict[str, int] | None = None,
+    log_entries: list[dict[str, Any]] | None = None,
+    tester_tag: str | None = None,
+) -> dict[str, Any]:
+    """Full per-task metrics block (see the module docstring).
+
+    `context_limits` (effective max_context_tokens per role, §1.2) enables
+    the tester-threshold-source classification (`analyze_tester_threshold`)
+    — without it that block reports the raw observations only; the
+    recorder log backs the token estimate when the mid-round compaction
+    replaced the round transcript in place."""
     events = parse_events(task.get("events") or [])
     messages = task.get("messages") or []
     coder_fill_events = [e for e in events.compactions if e.kind == "start"]
+
+    n_summaries = sum(
+        1 for m in messages if is_summary_message(m)
+    ) + sum(
+        1
+        for rnd in task.get("tester_messages") or []
+        for m in rnd
+        if is_summary_message(m)
+    )
+    tester_threshold = analyze_tester_threshold(
+        task,
+        context_limits or {},
+        log_entries=log_entries,
+        tester_tag=tester_tag,
+    )
 
     stability = {
         "compaction_failed": len(events.compaction_failed),
@@ -454,14 +785,31 @@ def analyze_task(task: dict[str, Any]) -> dict[str, Any]:
                 if e.phase == "tester" and e.kind == "start"
             ),
         },
+        # Degradation signal (§10): a summary did not stick — the context
+        # filled up again and drcode had to compact a second time. One
+        # summary per transcript is the healthy shape; more is the
+        # "deterioration after summary" the report must surface.
+        "n_summaries_in_transcript": n_summaries,
+        "repeat_compaction": n_summaries > 1,
+        # Trigger kinds (§1.2): mid-run = pause → sanitized_messages →
+        # summary → continuation turn; turn_boundary = the between-turns
+        # gate. S3's checks assert at least one of them happened.
+        "mid_run_pause": any(
+            e.kind == "start" and "pausing the run" in e.detail
+            for e in events.compactions
+        ),
+        "turn_boundary_pause": any(
+            e.kind == "start" and "pausing the agent" in e.detail
+            for e in events.compactions
+        ),
+        "tester_threshold": tester_threshold,
         "events": [e.as_dict() for e in events.compactions],
     }
     n_prompts = sum(
         1
         for m in messages
-        if _is_request(m)
-        and (c := user_prompt_content(m)) is not None
-        and not c.startswith(COMPACTION_SUMMARY_PREFIX)
+        for c in user_prompt_contents(m)
+        if not c.startswith(COMPACTION_SUMMARY_PREFIX)
     )
     final_usage = next(
         (u for m in reversed(messages) if _is_response(m) and (u := usage_of(m))),
@@ -589,6 +937,60 @@ def _load_model_log(run_dir: Path, entries: list[dict[str, Any]] | None = None) 
         "requests": sum(e["requests"] for e in per_role.values()),
         "latency_ms_p50": _percentile(all_latencies, 50),
         "latency_ms_p95": _percentile(all_latencies, 95),
+    }
+
+
+# --- user simulator log (§6/§10) --------------------------------------------
+
+# Actions of bench/user_sim.py that actually mutated task state through
+# the public TaskManager API — the report's "вмешательств симулятора".
+# Kept as a literal (not imported from bench.user_sim) so this module
+# stays import-free: it must keep working on any snapshot without
+# pulling drcode into the process.
+USER_SIM_INTERVENTION_ACTIONS = ("clarification_answer", "followup", "stuck_nudge")
+
+
+def read_user_sim_entries(run_dir: Path) -> list[dict[str, Any]]:
+    """Raw records of `user_sim.jsonl` (simulator §6), corrupt lines
+    skipped. Missing file → empty list (a run without the simulator)."""
+    path = run_dir / "user_sim.jsonl"
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def analyze_user_sim(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate the simulator log (§6/§10): how many interventions were
+    made (and of which kind) and which scenario failures it recorded —
+    the report must be able to tell "the model is dumb" from "the
+    simulator intervened"."""
+    by_action: dict[str, int] = {}
+    for rec in entries:
+        action = str(rec.get("action") or "unknown")
+        by_action[action] = by_action.get(action, 0) + 1
+    interventions = sum(by_action.get(a, 0) for a in USER_SIM_INTERVENTION_ACTIONS)
+    failures = [
+        str((rec.get("detail") or {}).get("reason") or rec.get("detail") or "unknown")
+        for rec in entries
+        if rec.get("action") == "failure"
+    ]
+    return {
+        "file": "user_sim.jsonl",
+        "records": len(entries),
+        "interventions": interventions,
+        "by_action": by_action,
+        "failures": failures,
     }
 
 
@@ -738,8 +1140,10 @@ def cross_check_usage(
         },
         "unexplained": unexplained_transcript > 0 or unexplained_recorder > 0,
         "explanation": (
-            "compaction-agent responses are not persisted (§1.5): unmatched "
-            "recorder entries ≈ compaction requests"
+            "compaction-agent responses are not persisted (§1.5), and "
+            "mid-run/mid-round compaction REMOVES the pre-compaction "
+            "responses from the transcript — unmatched recorder entries ≈ "
+            "compaction requests + responses compacted away"
         ),
     }
 
@@ -790,6 +1194,9 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
 
     tasks: list[dict[str, Any]] = []
     raw_tasks: list[dict[str, Any]] = []
+    context_limits = read_context_limits(run_dir)
+    log_entries = read_model_log_entries(run_dir)
+    tester_tag = _tester_role_tag(run_dir) if context_limits else None
     if tasks_dir is not None:
         for path in sorted(tasks_dir.glob("*.json")):
             if path.name.endswith(".bak"):
@@ -801,7 +1208,19 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             if not isinstance(raw, dict) or "title" not in raw:
                 continue  # not a task file
             raw_tasks.append(raw)
-            tasks.append(analyze_task(raw))
+            tasks.append(
+                analyze_task(
+                    raw,
+                    context_limits=context_limits,
+                    log_entries=log_entries,
+                    tester_tag=tester_tag,
+                )
+            )
+
+    # Simulator §6 (§10): interventions and scenario failures of the user
+    # simulator — None for runs that predate the simulator.
+    user_sim_entries = read_user_sim_entries(run_dir)
+    user_sim = analyze_user_sim(user_sim_entries) if user_sim_entries else None
 
     totals = {
         "n_tasks": len(tasks),
@@ -809,6 +1228,15 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         "n_testing_rounds": sum(t["testing"]["n_rounds"] for t in tasks),
         "n_compactions": sum(t["compactions"]["n_succeeded"] for t in tasks),
         "n_compactions_started": sum(t["compactions"]["n_started"] for t in tasks),
+        # Repeat compaction (§10: degradation after summary) and the
+        # compaction-failed state (§1.2: never fatal — gate off, run
+        # continues uncompressed; the report must surface both).
+        "n_repeat_compactions": sum(
+            1 for t in tasks if t["compactions"]["repeat_compaction"]
+        ),
+        "n_summaries": sum(
+            t["compactions"]["n_summaries_in_transcript"] for t in tasks
+        ),
         "usage": _sum_usage(tasks),
         "stability": {
             "compaction_failed": sum(t["stability"]["compaction_failed"] for t in tasks),
@@ -822,6 +1250,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
                 t["stability"]["excluded_from_queue"] for t in tasks
             ),
         },
+        "user_sim_interventions": user_sim["interventions"] if user_sim else 0,
     }
     # Bug round-trips (§10): bug tasks with their activation stamps.
     bug_round_trips = [
@@ -834,11 +1263,27 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         if t["kind"] == "bug"
     ]
 
+    # Tester-threshold source (§1.2/§13, S4): drcode derives the tester's
+    # compaction threshold from the CODING model's config — verified here,
+    # not assumed. None = no tester compaction to classify.
+    tester_sources = [
+        t["compactions"]["tester_threshold"]
+        for t in tasks
+        if t["compactions"]["tester_threshold"]
+    ]
+    if not tester_sources:
+        tester_threshold_from_coding: bool | None = None
+    elif any(s["source"] in ("tester", "mixed") for s in tester_sources):
+        tester_threshold_from_coding = False
+    elif any(s["source"] == "coding" for s in tester_sources):
+        tester_threshold_from_coding = True
+    else:
+        tester_threshold_from_coding = None  # only unclassified observations
+
     # Recorder §5 (§10): per-role requests/latency/tokens, plus the
     # cross-check of the recorder's billing against the usage persisted
     # in the task transcripts (compaction responses are not persisted —
     # §1.5 — so unmatched recorder entries ≈ compaction requests).
-    log_entries = read_model_log_entries(run_dir)
     model_log = _load_model_log(run_dir, log_entries)
     usage_cross_check: dict[str, Any] | None = None
     if log_entries:
@@ -872,8 +1317,11 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         },
         "totals": totals,
         "bug_round_trips": bug_round_trips,
+        "context_limits": context_limits or None,
+        "tester_threshold_from_coding": tester_threshold_from_coding,
         "tasks": tasks,
         "model_log": model_log,
+        "user_sim": user_sim,
         "usage_cross_check": usage_cross_check,
     }
     if write:

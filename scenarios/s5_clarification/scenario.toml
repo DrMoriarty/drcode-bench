@@ -1,0 +1,36 @@
+# S5 — clarification round-trip (plan drcode-bench.md §7). The brief
+# demands a decision the repository cannot supply, so the coder must call
+# ask_clarifying_question; the user simulator answers via TaskManager.send()
+# (the task jumps back to the head of the queue), the answer is consumed
+# as ONE prompt (no duplicates — the send()/is_pending_retry dedupe), the
+# implementation passes testing and the task completes.
+
+id = "s5_clarification"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Реализуйте format_price()"
+kind = "feature"
+text = """
+Реализуйте функцию format_price(amount, currency='RUB') в prices.py:
+она должна возвращать цену, отформатированную по корпоративному стандарту
+оформления цен.
+
+Стандарта НЕТ в репозитории: в prices.py нет ни тестов, ни примеров, ни
+документации — он известен только пользователю. НЕ выдумывайте формат и
+не пытайтесь вывести его из чего-либо в репозитории. Если формат вам не
+известен — задайте уточняющий вопрос через инструмент
+ask_clarifying_question и дождитесь ответа пользователя. После ответа
+реализуйте функцию строго по стандарту из ответа.
+"""
+
+[[clarification_answers]]
+match = "формат"
+answer = """
+Стандарт оформления цен: два знака после запятой; десятичный разделитель —
+запятая; разряды тысяч разделяются обычным пробелом; символ валюты (для
+RUB — ₽) через обычный пробел после суммы. Пример: 1 234,50 ₽.
+"""
+
+[settle]
+verification = "passed"
