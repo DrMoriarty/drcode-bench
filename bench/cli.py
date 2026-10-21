@@ -41,10 +41,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     print(
-        "\nnot implemented yet: the run orchestrator (bench/run_one.py — "
-        "headless DrCodeApp, settle detection, metrics extraction) is stage 2 "
-        "of the plan (drcode-bench.md §12.2). Environment preparation itself "
-        "already works: see bench/env_setup.py and its tests."
+        "\nnot implemented yet: the parallel orchestrator over the matrix "
+        "(spawning `python -m bench.run_one <scenario> <combo> <run_dir>` "
+        "subprocesses, repeats, artifact collection). A SINGLE run is "
+        "already available: python -m bench.run_one <scenario> <combo> "
+        "<run_dir> — headless DrCodeApp, settle detection (§4), scenario "
+        "checks and failure diagnostics."
     )
     return 0
 

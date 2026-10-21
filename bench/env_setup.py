@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from .matrix import Combo, ProviderSpec, ROLES, _resolve_api_key, load_matrix
+from .matrix import Combo, ProviderSpec, ROLES, _resolve_api_key, load_matrix, parse_ref
 
 # `task_finalization` values allowed for a benchmark run. "none" is not
 # useful here (the benchmark exists to exercise the tester).
@@ -260,8 +260,30 @@ def prepare_run(
         user_drcode_dir / "models.json", build_catalog(used_providers, combo)
     )
 
-    # 3. project-level per-role selection (+ optional flat layer).
-    flat = dict(flat_config) if flat_config else {}
+    # 3. project-level per-role selection (+ flat layer). The flat layer
+    #    MUST carry the coding connection: drcode's TUI starts the pipeline
+    #    on mount only when `Config.is_ready` (flat model + base_url) —
+    #    a bare per-role "models" map leaves the app stuck on the setup
+    #    dialog. The per-role "models" key still wins for every role via
+    #    providers.resolve (env > project models > catalog default > flat),
+    #    so the flat values here are just the coding baseline.
+    coding_provider_name, coding_model_id = parse_ref(
+        combo.coding, f"combo '{combo.name}' role coding"
+    )
+    coding_spec = used_providers[coding_provider_name]
+    coding_model = coding_spec.model(coding_model_id)
+    flat = {
+        "model": coding_model.id,
+        "base_url": coding_spec.base_url,
+        "api_key": _resolve_api_key(coding_spec.api_key),
+        "health_check_url": "",
+        "max_context_tokens": coding_model.max_context_tokens,
+        "max_tokens": coding_model.max_tokens,
+        "compaction_threshold": coding_model.compaction_threshold,
+    }
+    if flat_config:
+        flat.update(flat_config)
+    flat = {k: v for k, v in flat.items() if v is not None}
     project_config = _write_json(
         workspace / PROJECT_STATE_DIRNAME / "drcode.json",
         {**flat, "models": combo.roles()},
@@ -273,7 +295,6 @@ def prepare_run(
     remote: Path | None = None
     if task_finalization == "testing_commit":
         remote = run_dir / "remote.git"
-        _git("init", "--bare", "--initial-branch=main", cwd=run_dir.__class__(".") if False else None) if False else None
     settings_file = _write_json(
         workspace / PROJECT_STATE_DIRNAME / "settings.json",
         {
