@@ -23,7 +23,11 @@ Inside this process:
     5. `viewed_id` is NEVER touched: opening a task renders the whole
        transcript and would put render overhead into the measurements
        (plan §4/§13);
-    6. `bench.settle.wait_settle` polls the settle criterion; on failure
+    6. `bench.recording.install_recorder` monkeypatches
+       `drcode.agent_model.build_model` BEFORE the app is created (§5):
+       every model request of every agent — coder, tester, compaction —
+       is logged with latency and usage into `<run_dir>/model_log.jsonl`;
+    7. `bench.settle.wait_settle` polls the settle criterion; on failure
        `dump_diagnostics` snapshots the run, `checks.py` of the scenario
        runs afterwards and everything lands in `<run_dir>/result.json`.
 
@@ -186,14 +190,16 @@ async def run_benchmark(
         report.dump(run_dir)
         return report
 
-    # §5 hook: the recording wrapper around build_model, when the module
-    # has arrived (plan stage 3). Absent → the run proceeds unrecorded.
-    try:
-        from .recording import install_recorder  # noqa: F401  (stage 3)
-    except ImportError:
-        install_recorder = None
-    if install_recorder is not None:
-        install_recorder(run_dir / "model_log.jsonl")
+    # §5: the recording wrapper around `agent_model.build_model`,
+    # installed BEFORE the app exists — every agent (coder, tester,
+    # compaction) is observed from its very first HTTP request, and the
+    # per-request log lands in `<run_dir>/model_log.jsonl`. The recorder
+    # is an observation instrument (§2), but its failure is
+    # infrastructure: failing fast here beats burning the scenario
+    # timeout on an unrecorded run.
+    from .recording import install_recorder
+
+    install_recorder(run_dir / "model_log.jsonl")
 
     try:
         app = DrCodeApp(paths.workspace)

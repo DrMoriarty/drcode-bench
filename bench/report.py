@@ -14,6 +14,7 @@ result.json, the run dir) so each run stays reproducibly dissectible.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,11 +88,35 @@ def _stability_flags(metrics: dict[str, Any]) -> str:
     return ", ".join(parts) if parts else "clean"
 
 
+def _model_log(m: dict[str, Any]) -> dict[str, Any]:
+    return m.get("model_log") or {}
+
+
+def _tokens_by_role(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per-role token totals aggregated over the repeats of a pair
+    (§10: recorder per-role prompt/completion sums, medians over runs)."""
+    per_run: dict[str, list[tuple[int, int]]] = {}
+    for m in runs:
+        log = _model_log(m)
+        for role, e in (log.get("per_role") or {}).items():
+            per_run.setdefault(role, []).append(
+                (int(e.get("input_tokens") or 0), int(e.get("output_tokens") or 0))
+            )
+    out: dict[str, dict[str, Any]] = {}
+    for role, values in per_run.items():
+        inputs = [v[0] for v in values]
+        outputs = [v[1] for v in values]
+        out[role] = {
+            "n_runs": len(values),
+            "input_tokens_median": round(statistics.median(inputs), 1),
+            "output_tokens_median": round(statistics.median(outputs), 1),
+        }
+    return out
+
+
 def _agg(values: list[float | int | None]) -> dict[str, Any]:
     """Spread-aware aggregate of one metric over the repeats of a pair
     (§10: medians/разброс; a single run is a repeat count of 1)."""
-    import statistics
-
     known = [float(v) for v in values if v is not None]
     if not known:
         return {"n": len(values), "median": None, "min": None, "max": None}
@@ -107,8 +132,10 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group runs by (scenario, combo) and aggregate the report metrics.
 
     Shape is repeat-ready: every pair carries `_agg` blocks for wall-time,
-    compactions and testing rounds; verdicts list all outcomes seen across
-    the repeats (a pair is only as good as its worst repeat)."""
+    compactions, testing rounds and the recorder's model traffic
+    (requests, latency p50/p95, tokens per role — §10); verdicts list all
+    outcomes seen across the repeats (a pair is only as good as its worst
+    repeat)."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for m in runs:
         key = (m.get("scenario") or "?", m.get("combo") or "?")
@@ -127,6 +154,9 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 for m in group
             ]
         )
+        requests = _agg([_model_log(m).get("requests") for m in group])
+        latency_p50 = _agg([_model_log(m).get("latency_ms_p50") for m in group])
+        latency_p95 = _agg([_model_log(m).get("latency_ms_p95") for m in group])
         pairs.append(
             {
                 "scenario": scenario,
@@ -137,6 +167,10 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "compactions": compactions,
                 "testing_rounds": rounds,
                 "output_tokens": tokens,
+                "model_requests": requests,
+                "latency_ms_p50": latency_p50,
+                "latency_ms_p95": latency_p95,
+                "tokens_by_role": _tokens_by_role(group),
                 "stability": sorted(
                     {_stability_flags(m) for m in group} - {"clean"}
                 )
@@ -149,14 +183,25 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     lines = [
         "| scenario | combo | runs | verdicts | wall-time (median, s) | "
-        "compactions (med) | testing rounds (med) | output tokens (med) | stability |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "compactions (med) | testing rounds (med) | output tokens (med) | "
+        "model requests (med) | latency p50/p95 (med, s) | "
+        "tokens by role (med, prompt/compl.) | stability |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
         wall = p["wall_time_s"]
         wall_str = _fmt(wall["median"], " s")
         if wall["n"] > 1 and wall["min"] != wall["max"]:
             wall_str += f" [{_fmt(wall['min'])}…{_fmt(wall['max'])}]"
+        lat_p50 = p["latency_ms_p50"]
+        lat_str = (
+            f"{_fmt(lat_p50['median'] / 1000 if lat_p50['median'] is not None else None)} / "
+            f"{_fmt(p['latency_ms_p95']['median'] / 1000 if p['latency_ms_p95']['median'] is not None else None)}"
+        )
+        tokens_by_role = "; ".join(
+            f"{role}: {_fmt(v['input_tokens_median'])}/{_fmt(v['output_tokens_median'])}"
+            for role, v in p["tokens_by_role"].items()
+        )
         lines.append(
             f"| {p['scenario']} | {p['combo']} | {wall['n']} "
             f"| {', '.join(p['verdicts'])} "
@@ -164,6 +209,9 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             f"| {_fmt(p['compactions']['median'])} "
             f"| {_fmt(p['testing_rounds']['median'])} "
             f"| {_fmt(p['output_tokens']['median'])} "
+            f"| {_fmt(p['model_requests']['median'])} "
+            f"| {lat_str} "
+            f"| {tokens_by_role or '—'} "
             f"| {', '.join(p['stability'])} |"
         )
     return lines
@@ -251,13 +299,37 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
         model_log = m.get("model_log")
         if model_log:
             lines.append("Model usage per role (recorder):\n")
-            lines.append("| role | requests | latency total s | input tok | output tok |")
-            lines.append("|---|---|---|---|---|")
+            lines.append(
+                "| role | requests | latency total s | latency p50 s | latency p95 s "
+                "| input tok | output tok |"
+            )
+            lines.append("|---|---|---|---|---|---|---|")
             for role, e in model_log.get("per_role", {}).items():
                 lines.append(
                     f"| {role} | {e['requests']} "
                     f"| {_fmt(e['latency_ms_total'] / 1000)} "
+                    f"| {_fmt((e.get('latency_ms_p50') or 0) / 1000)} "
+                    f"| {_fmt((e.get('latency_ms_p95') or 0) / 1000)} "
                     f"| {e.get('input_tokens', 0)} | {e.get('output_tokens', 0)} |"
+                )
+            lines.append("")
+            lines.append(
+                f"Overall: {model_log.get('requests', 0)} model requests, "
+                f"latency p50 {_fmt((model_log.get('latency_ms_p50') or 0) / 1000, ' s')} / "
+                f"p95 {_fmt((model_log.get('latency_ms_p95') or 0) / 1000, ' s')}."
+            )
+            cross = m.get("usage_cross_check")
+            if cross:
+                flag = (
+                    "UNEXPLAINED DISCREPANCIES"
+                    if cross.get("unexplained")
+                    else "no unexplained discrepancies"
+                )
+                lines.append(
+                    f"Recorder ↔ transcript cross-check: {cross['matched']}/"
+                    f"{cross['transcript_responses']} transcript responses matched, "
+                    f"{cross['n_unmatched_recorder']} unmatched recorder entries "
+                    f"(compaction requests, §1.5) — {flag}."
                 )
             lines.append("")
         lines.append(f"Artifacts: `{rel}/`\n")

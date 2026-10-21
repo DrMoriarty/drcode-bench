@@ -21,6 +21,14 @@ What is extracted per run (into `runs/<run_id>/metrics.json`):
   before the summary vs the first response after it;
 - correctness: `verification` + the harness verdict (checks.py result
   from `result.json`);
+- model traffic from the recorder (`model_log.jsonl`, §5): requests per
+  role, per-request latency (p50/p95 per role and overall), tokens per
+  role (prompt/completion) — and the cross-check of the recorder's
+  billing against the `usage` of the serialized ModelResponses of the
+  task transcripts (`usage_cross_check` in metrics.json: unmatched
+  transcript responses are always unexplained; unmatched recorder
+  entries are expected to be compaction-agent requests, whose responses
+  drcode does not persist, §1.5);
 - testing rounds (`len(tester_messages)`) and bug round-trips (tasks
   with kind=bug and their activation times);
 - stability: "compaction failed" / "tester failed" / network retries /
@@ -499,14 +507,26 @@ def find_tasks_dir(run_dir: Path) -> Path | None:
     return None
 
 
-def _load_model_log(run_dir: Path) -> dict[str, Any] | None:
-    """Aggregate `model_log.jsonl` (recorder §5) when present: per-role
-    request counts, latency and tokens. Missing file → None (the recorder
-    arrives at plan stage 2; runs without it stay unrecorded)."""
+def _percentile(values: list[float], pct: float) -> float | None:
+    """Linear-interpolated percentile of a non-empty list (None otherwise)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 1)
+    k = (len(ordered) - 1) * (pct / 100.0)
+    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+    frac = k - lo
+    return round(ordered[lo] + (ordered[hi] - ordered[lo]) * frac, 1)
+
+
+def read_model_log_entries(run_dir: Path) -> list[dict[str, Any]]:
+    """Raw records of `model_log.jsonl` (recorder §5), corrupt lines
+    skipped. Missing file → empty list (a run predating the recorder)."""
     path = run_dir / "model_log.jsonl"
     if not path.is_file():
-        return None
-    per_role: dict[str, dict[str, Any]] = {}
+        return []
+    out: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -515,16 +535,41 @@ def _load_model_log(run_dir: Path) -> dict[str, Any] | None:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _load_model_log(run_dir: Path, entries: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """Aggregate `model_log.jsonl` (recorder §5) when present: per-role
+    request counts (one HTTP request = one line), latency (per-role and
+    overall p50/p95, §10) and tokens per role. Missing file → None (a
+    run without the recorder stays unrecorded)."""
+    if entries is None:
+        entries = read_model_log_entries(run_dir)
+    if not entries:
+        return None
+    per_role: dict[str, dict[str, Any]] = {}
+    all_latencies: list[float] = []
+    for rec in entries:
         role = str(rec.get("role") or "unknown")
         entry = per_role.setdefault(
             role,
-            {"requests": 0, "latency_ms_total": 0, "latency_ms_max": 0, **EMPTY_USAGE},
+            {
+                "requests": 0,
+                "latency_ms_total": 0,
+                "latency_ms_max": 0,
+                "latencies_ms": [],
+                **EMPTY_USAGE,
+            },
         )
         entry["requests"] += 1
         latency = rec.get("latency_ms")
         if isinstance(latency, (int, float)):
             entry["latency_ms_total"] += int(latency)
             entry["latency_ms_max"] = max(entry["latency_ms_max"], int(latency))
+            entry["latencies_ms"].append(float(latency))
+            all_latencies.append(float(latency))
         usage = rec.get("usage")
         if isinstance(usage, dict):
             for key in (
@@ -534,7 +579,169 @@ def _load_model_log(run_dir: Path) -> dict[str, Any] | None:
                 "cache_write_tokens",
             ):
                 entry[key] = entry.get(key, 0) + int(usage.get(key) or 0)
-    return {"file": path.name, "per_role": per_role} if per_role else None
+    for entry in per_role.values():
+        latencies = entry.pop("latencies_ms")
+        entry["latency_ms_p50"] = _percentile(latencies, 50)
+        entry["latency_ms_p95"] = _percentile(latencies, 95)
+    return {
+        "file": "model_log.jsonl",
+        "per_role": per_role,
+        "requests": sum(e["requests"] for e in per_role.values()),
+        "latency_ms_p50": _percentile(all_latencies, 50),
+        "latency_ms_p95": _percentile(all_latencies, 95),
+    }
+
+
+# --- recorder ↔ transcript cross-check (§10) -------------------------------
+
+
+def transcript_responses(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every completed model response persisted for one task, with the
+    source transcript it came from: the coder transcript (`messages`)
+    and each tester round (`tester_messages`). The compaction agent's
+    responses are NOT persisted (§1.5) — that asymmetry is exactly what
+    the cross-check below accounts for."""
+    out: list[dict[str, Any]] = []
+    for source, groups in (
+        ("coder", [task.get("messages") or []]),
+        ("tester", task.get("tester_messages") or []),
+    ):
+        for group in groups:
+            for msg in group:
+                if not _is_response(msg):
+                    continue
+                usage = usage_of(msg)
+                if usage is None:
+                    continue  # an attempt that never completed
+                out.append(
+                    {
+                        "source": source,
+                        "ts": dt_or(message_time(msg)),
+                        "input_tokens": usage["input_tokens"],
+                        "output_tokens": usage["output_tokens"],
+                    }
+                )
+    return out
+
+
+def cross_check_usage(
+    responses: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+    *,
+    n_compactions_started: int = 0,
+    tolerance_s: float = 60.0,
+) -> dict[str, Any]:
+    """Сверка (§10): every token the recorder billed must be either a
+    transcript response or a compaction-agent request (whose response
+    is never persisted, §1.5); every transcript response must have been
+    billed by the recorder.
+
+    Matching pairs a transcript response with a recorder entry by equal
+    (input_tokens, output_tokens) and |Δt| ≤ tolerance_s — the same
+    ModelResponse object is on both sides, so the token pairs coincide
+    exactly and the timestamps are milliseconds apart. Unmatched
+    recorder entries are expected to be compaction requests (their
+    count vs `n_compactions_started` is reported); anything beyond
+    that — or ANY unmatched transcript response — is an unexplained
+    discrepancy the metrics consumer must see.
+    """
+    used = [False] * len(entries)
+    unmatched_transcript: list[dict[str, Any]] = []
+    matched = 0
+
+    def rec_ts(rec: dict[str, Any]) -> float | None:
+        raw = rec.get("ts")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        dt = parse_ts(raw)
+        return dt.timestamp() if dt else None
+
+    for resp in sorted(responses, key=lambda r: r["ts"] or ""):
+        resp_ts = parse_ts(resp["ts"])
+        best_i, best_dt = None, None
+        for i, rec in enumerate(entries):
+            if used[i] or rec.get("error"):
+                continue
+            usage = rec.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            if (
+                int(usage.get("input_tokens") or 0) != resp["input_tokens"]
+                or int(usage.get("output_tokens") or 0) != resp["output_tokens"]
+            ):
+                continue
+            rec_t = rec_ts(rec)
+            if resp_ts is None or rec_t is None:
+                best_i, best_dt = i, 0.0  # token pair alone, stamps missing
+                break
+            dt = abs(rec_t - resp_ts.timestamp())
+            if dt > tolerance_s:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_i, best_dt = i, dt
+        if best_i is not None:
+            used[best_i] = True
+            matched += 1
+        else:
+            unmatched_transcript.append(resp)
+
+    unmatched_recorder: dict[str, dict[str, int]] = {}
+    for i, rec in enumerate(entries):
+        if used[i] or rec.get("error"):
+            continue
+        role = str(rec.get("role") or "unknown")
+        acc = unmatched_recorder.setdefault(role, {"requests": 0, "input_tokens": 0, "output_tokens": 0})
+        acc["requests"] += 1
+        usage = rec.get("usage")
+        if isinstance(usage, dict):
+            acc["input_tokens"] += int(usage.get("input_tokens") or 0)
+            acc["output_tokens"] += int(usage.get("output_tokens") or 0)
+    errored = sum(1 for rec in entries if rec.get("error"))
+
+    tokens_transcript = {
+        "input_tokens": sum(r["input_tokens"] for r in responses),
+        "output_tokens": sum(r["output_tokens"] for r in responses),
+    }
+    tokens_recorder = {
+        "input_tokens": sum(
+            int(rec.get("usage", {}).get("input_tokens") or 0)
+            for rec in entries
+            if not rec.get("error") and isinstance(rec.get("usage"), dict)
+        ),
+        "output_tokens": sum(
+            int(rec.get("usage", {}).get("output_tokens") or 0)
+            for rec in entries
+            if not rec.get("error") and isinstance(rec.get("usage"), dict)
+        ),
+    }
+    n_unmatched_recorder = sum(a["requests"] for a in unmatched_recorder.values())
+    unexplained_transcript = len(unmatched_transcript)
+    # Compaction requests have no transcript counterpart; a failed
+    # compaction (no persisted summary either) can leave several.
+    unexplained_recorder = max(0, n_unmatched_recorder - n_compactions_started)
+
+    return {
+        "tolerance_s": tolerance_s,
+        "transcript_responses": len(responses),
+        "recorder_entries": len(entries),
+        "recorder_errored": errored,
+        "matched": matched,
+        "unmatched_transcript": unmatched_transcript,
+        "unmatched_recorder": unmatched_recorder,
+        "n_unmatched_recorder": n_unmatched_recorder,
+        "n_compactions_started": n_compactions_started,
+        "tokens": {
+            "transcript": tokens_transcript,
+            "recorder": tokens_recorder,
+            "delta_input": tokens_recorder["input_tokens"] - tokens_transcript["input_tokens"],
+            "delta_output": tokens_recorder["output_tokens"] - tokens_transcript["output_tokens"],
+        },
+        "unexplained": unexplained_transcript > 0 or unexplained_recorder > 0,
+        "explanation": (
+            "compaction-agent responses are not persisted (§1.5): unmatched "
+            "recorder entries ≈ compaction requests"
+        ),
+    }
 
 
 def _verdict(result: dict[str, Any], tasks: list[dict[str, Any]]) -> str:
@@ -582,6 +789,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         raise MetricsError(f"no run artifacts in {run_dir}")
 
     tasks: list[dict[str, Any]] = []
+    raw_tasks: list[dict[str, Any]] = []
     if tasks_dir is not None:
         for path in sorted(tasks_dir.glob("*.json")):
             if path.name.endswith(".bak"):
@@ -592,6 +800,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
                 continue
             if not isinstance(raw, dict) or "title" not in raw:
                 continue  # not a task file
+            raw_tasks.append(raw)
             tasks.append(analyze_task(raw))
 
     totals = {
@@ -625,6 +834,20 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         if t["kind"] == "bug"
     ]
 
+    # Recorder §5 (§10): per-role requests/latency/tokens, plus the
+    # cross-check of the recorder's billing against the usage persisted
+    # in the task transcripts (compaction responses are not persisted —
+    # §1.5 — so unmatched recorder entries ≈ compaction requests).
+    log_entries = read_model_log_entries(run_dir)
+    model_log = _load_model_log(run_dir, log_entries)
+    usage_cross_check: dict[str, Any] | None = None
+    if log_entries:
+        usage_cross_check = cross_check_usage(
+            [r for raw in raw_tasks for r in transcript_responses(raw)],
+            log_entries,
+            n_compactions_started=totals["n_compactions_started"],
+        )
+
     metrics: dict[str, Any] = {
         "schema": SCHEMA,
         "run_id": run_dir.name,
@@ -650,7 +873,8 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         "totals": totals,
         "bug_round_trips": bug_round_trips,
         "tasks": tasks,
-        "model_log": _load_model_log(run_dir),
+        "model_log": model_log,
+        "usage_cross_check": usage_cross_check,
     }
     if write:
         out = run_dir / "metrics.json"
