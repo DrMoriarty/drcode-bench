@@ -34,14 +34,29 @@ uv run bench report runs/
 прогона (`bench/run_one.py`, headless `DrCodeApp`) подключается на
 следующем этапе.
 
+Одиночный прогон (этапы 1–3, §12):
+
+```bash
+# один прогон сценария на комбинации: env → headless DrCodeApp → settle (§4)
+python -m bench.run_one s2a_bug_followup strong-coder/cheap-tester runs/s2a-r1
+
+# внутри прогона работает симулятор пользователя (§6): авто-ответы на
+# clarification, follow-up-комментарии, защита от залипания — все
+# вмешательства пишутся в runs/<run_id>/user_sim.jsonl
+```
+
 ## Структура
 
 ```
 ├── matrix.toml          # провайдеры + комбинации моделей по ролям (§8)
 ├── bench/
 │   ├── __main__.py      # CLI: run / report
-│   ├── matrix.py        # парсинг matrix.toml, Combo, подстановка env:KEY
-│   └── env_setup.py     # tmp-дерево прогона: models.json, drcode.json, settings.json, git (§3)
+│   ├── run_one.py       # один прогон: env → DrCodeApp headless → settle (§4)
+│   ├── recording.py     # recording-обёртка build_model (§5)
+│   ├── user_sim.py      # симулятор пользователя (§6)
+│   ├── settle.py        # критерий завершения + диагностика провала (§4)
+│   ├── metrics.py       # парсинг .drcode/tasks/*.json + логов (§10)
+│   └── report.py        # агрегация → markdown (§10)
 ├── scenarios/           # сценарии: seed/ + scenario.toml + checks.py (§7)
 ├── drcode/              # субмодуль — исходники drcode
 └── runs/                # артефакты прогонов (gitignored)

@@ -57,6 +57,35 @@ S7 fault injection (опция).
 
 Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**.
 
+## Интерактивные сценарии этапа 3 (план §6/§7)
+
+- `s2a_bug_followup/` — seeded bug: тестер ставит FAILED, симулятор
+  пользователя (§6) отправляет follow-up «вот лог ошибки, исправь»
+  (текст — из сценария), второй раунд чинит и завершается PASSED.
+  Assertions checks.py: ≥2 testing-раунда, финально PASSED, follow-up
+  виден в транскрипте кодера ровно одним prompt'ом (без дублей).
+- `s2b_bug_report/` — бриф подталкивает тестера к `create_bug_report` на
+  дефекте вне объёма задачи; баг-задача (kind=bug) выполняется раньше
+  прочих в очереди (по `activated_at` — bugs newest-first в
+  `TaskManager.queued()`), обе brief-задачи COMPLETED, баг-задача прошла
+  testing (PASSED).
+- `s5_clarification/` — brief требует данных, которых нет в репозитории:
+  кодер вызывает `ask_clarifying_question`, симулятор отвечает через
+  `TaskManager.send()` (голова очереди). Assertions checks.py: ответ
+  потреблён ровно одним prompt'ом (нет дублей — проверка через логику
+  `is_pending_retry`), ответ не остался в `pending_input`, цепочка
+  clarification→queued→completed подтверждена записью в `user_sim.jsonl`
+  (действие `clarification_answer` в статусе `clarification`).
+
+Симулятор пользователя (`bench/user_sim.py`, §6) подключён в
+`bench/run_one.py`: asyncio-таск в том же loop, опрос `app.manager` раз в
+0.75 с, все мутации — только публичный API `TaskManager` (тот же, что
+использует TUI); каждое действие пишется в `runs/<run_id>/user_sim.jsonl`,
+провалы сценария (нет ответа на clarification, залипание ACTIVE без
+работы) — жёсткий settle-blocker. `metrics.json` агрегирует
+`user_sim_interventions`, отчёт добавляет колонки «вмешательств
+симулятора» и «bug round-trip'ов».
+
 ## Компакционные сценарии S3/S4 (этап 4, план §1.2/§12)
 
 - «Маленький контекст» ставится **кодинговой** модели: либо отдельным id
@@ -83,5 +112,4 @@ S7 fault injection (опция).
 - Деградационная combo «слабого компактизатора» — `degradation-weak-compactor`
   в matrix.toml (ручная проверка); полный матричный раннер — этап 5.
 
-Этап 1 — только скелет: сами сценарии наполняются по мере реализации
-этапов плана (§12).
+Этапы 4–5 плана (§12) наполняют остальные сценарии и матричный раннер.

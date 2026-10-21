@@ -142,6 +142,30 @@ def test_generate_report_writes_markdown(tmp_path: Path) -> None:
     assert "1550" in text and "1240" in text
 
 
+def test_report_shows_sim_interventions_and_round_trips(tmp_path: Path) -> None:
+    """§6/§10: the report must be able to tell "the model is dumb" from
+    "the simulator intervened" — a dedicated column + per-run details."""
+    metrics = make_metrics(
+        "r1",
+        "s2a",
+        "c1",
+        user_sim={
+            "file": "user_sim.jsonl",
+            "records": 3,
+            "interventions": 2,
+            "by_action": {"followup": 2},
+            "failures": [],
+        },
+    )
+    metrics["bug_round_trips"] = [{"id": "b1", "title": "bug", "activated_at": "x"}]
+    _write_run(tmp_path / "runs", metrics)
+    out = generate_report(tmp_path / "runs")
+    text = out.read_text(encoding="utf-8")
+    assert "sim interventions" in text
+    assert "bug round-trips" in text
+    assert "User-simulator interventions: 2" in text
+
+
 def test_generate_report_out_option(tmp_path: Path) -> None:
     _write_run(tmp_path / "runs", make_metrics("r1", "s1_happy", "combo-a"))
     out = generate_report(tmp_path / "runs", out=tmp_path / "elsewhere" / "report.md")
