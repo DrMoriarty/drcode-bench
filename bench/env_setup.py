@@ -9,7 +9,10 @@ One run = one isolated tmp tree:
     │   ├── .gitignore        # ".drcode/" (matches drcode's own behavior)
     │   ├── .git/             # init + first commit
     │   └── .drcode/
-    │       ├── drcode.json   # flat layer + per-role "models" selection
+    │       ├── drcode.json   # per-role "models" selection + non-provider
+    │       │                 # settings (compaction_threshold); provider
+    │       │                 # fields never live here (drcode ≥ 0.5 moves
+    │       │                 # them into the catalog / custom models)
     │       └── settings.json # task_finalization / stall_nudge / completed_retention
     ├── config-home/          # becomes XDG_CONFIG_HOME of the run subprocess
     │   └── drcode/
@@ -119,7 +122,8 @@ def materialize_providers(
     - An override on a (provider, model) pair NOT shared with a role that
       needs a different value: the catalog entry is patched in place —
       `providers.resolve` copies `max_context_tokens` from the entry into
-      the role's config, which beats the flat config (§1.2).
+      the role's config (the catalog entry is the layer that carries the
+      role's connection, §1.2).
     - A CONFLICT (same provider+model referenced by roles needing different
       values): the overridden role is re-pointed at a virtual provider
       `<name>--ctx<N>` — same base_url/api_key, single model entry with the
@@ -129,7 +133,7 @@ def materialize_providers(
     The point of the whole mechanism: compaction scenarios S3/S4 set a
     SMALL context on the coding model WITHOUT touching `DRCODE_*` env
     (which the run hygiene strips anyway, §13) — the override travels in
-    the generated models.json, the layer drcode itself honors per role.
+    the generated models.json, the catalog layer drcode honors per role.
     """
     refs: dict[str, tuple[str, str]] = {}
     wants: dict[tuple[str, str], dict[int, list[str]]] = {}
@@ -218,13 +222,13 @@ def build_catalog(
     providers: dict[str, ProviderSpec],
     combo: Combo,
 ) -> dict[str, object]:
-    """models.json payload for the combo (format: drcode `UserModelsConfig`,
-    see `models.json.example` of drcode). api_key = "env:NAME" is resolved
-    from the host environment here.
+    """models.json payload for the combo (format: drcode `UserModelsConfig`
+    / `ModelEntry`, see `drcode/src/drcode/providers.py`). api_key =
+    "env:NAME" is resolved from the host environment here.
 
     `providers` must already carry the combo's per-role context overrides
-    (`materialize_providers`) — the catalog entry is the layer that beats
-    the flat config for a role (§1.2)."""
+    (`materialize_providers`) — the catalog entry is the layer
+    `providers.resolve` reads a role's connection and context from (§1.2)."""
     out_providers = []
     for name in sorted(providers):
         spec = providers[name]
@@ -240,7 +244,6 @@ def build_catalog(
                         "max_context_tokens": model.max_context_tokens,
                         "max_tokens": model.max_tokens,
                         "compaction_threshold": model.compaction_threshold,
-                        "context_reported": False,
                     }
                     for model in spec.models.values()
                 ],
@@ -304,7 +307,6 @@ def prepare_run(
     providers: dict[str, ProviderSpec] | None = None,
     matrix_path: Path | None = None,
     task_finalization: str = "testing",
-    flat_config: dict[str, object] | None = None,
     agents_md: Path | None = None,
     proxy_base: str | None = None,
     exists_ok: bool = False,
@@ -315,8 +317,8 @@ def prepare_run(
     - copies `<scenario_dir>/seed/` into `workspace/` (+ `AGENTS.md` when
       the scenario provides one);
     - generates `config-home/drcode/models.json` from the combo's providers;
-    - writes `workspace/.drcode/drcode.json` (optional flat layer + the
-      per-role `models` selection) and `workspace/.drcode/settings.json`
+    - writes `workspace/.drcode/drcode.json` (the per-role `models`
+      selection + non-provider settings) and `workspace/.drcode/settings.json`
       (`stall_nudge="never"`, `completed_retention="never"`,
       `task_finalization="testing"` — or `"testing_commit"` with a LOCAL
       bare remote inside the run tree, never GitHub);
@@ -373,32 +375,21 @@ def prepare_run(
         user_drcode_dir / "models.json", build_catalog(catalog_providers, combo)
     )
 
-    # 3. project-level per-role selection (+ flat layer). The flat layer
-    #    MUST carry the coding connection: drcode's TUI starts the pipeline
-    #    on mount only when `Config.is_ready` (flat model + base_url) —
-    #    a bare per-role "models" map leaves the app stuck on the setup
-    #    dialog. The per-role "models" key still wins for every role via
-    #    providers.resolve (env > project models > catalog default > flat),
-    #    so the flat values here are just the coding baseline.
+    # 3. project-level per-role selection. Provider fields never live in
+    #    drcode.json (json layers stopped carrying them — drcode ≥ 0.5,
+    #    `Config._PROVIDER_FIELDS`): every role resolves through its
+    #    `models` ref into the generated catalog (providers.resolve). A
+    #    legacy flat config here would be silently absorbed (and
+    #    rewritten!) by drcode's startup migration `migrate_project_config`
+    #    mid-run — so the generated file only carries the per-role refs
+    #    plus non-provider settings (`compaction_threshold` still layers
+    #    through the ordinary Config json layering).
     coding_provider_name, coding_model_id = refs["coding"]
-    coding_spec = catalog_providers[coding_provider_name]
-    coding_model = coding_spec.model(coding_model_id)
-    flat = {
-        "model": coding_model.id,
-        "base_url": coding_spec.base_url,
-        "api_key": _resolve_api_key(coding_spec.api_key),
-        "health_check_url": "",
-        "max_context_tokens": coding_model.max_context_tokens,
-        "max_tokens": coding_model.max_tokens,
-        "compaction_threshold": coding_model.compaction_threshold,
-    }
-    if flat_config:
-        flat.update(flat_config)
-    flat = {k: v for k, v in flat.items() if v is not None}
-    project_config = _write_json(
-        workspace / PROJECT_STATE_DIRNAME / "drcode.json",
-        {**flat, "models": {role: f"{p}/{m}" for role, (p, m) in refs.items()}},
-    )
+    coding_model = catalog_providers[coding_provider_name].model(coding_model_id)
+    project: dict[str, object] = {"models": {role: f"{p}/{m}" for role, (p, m) in refs.items()}}
+    if coding_model.compaction_threshold is not None:
+        project["compaction_threshold"] = coding_model.compaction_threshold
+    project_config = _write_json(workspace / PROJECT_STATE_DIRNAME / "drcode.json", project)
 
     # 4. project settings: no watchdog, no retention cleanup, testing
     #    finalization — pushes go to a LOCAL bare remote inside the run
@@ -475,7 +466,7 @@ def verify_resolution(
     role → "provider/model" as resolved.
 
     Uses `drcode.providers.resolve()` — the same precedence (env >
-    project models > catalog defaults > flat config) the run will see;
+    project models > catalog defaults) the run will see;
     the expected refs/values come from `materialize_providers`, i.e. the
     combo's per-role overrides included. With `proxy_base` set (§9) the
     expected base_url is the proxy-routed one — the exact configuration

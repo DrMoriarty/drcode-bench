@@ -1,11 +1,11 @@
 """Parsing of `matrix.toml` (plan §8): providers + per-role combos.
 
 The format mirrors the user-level catalog of drcode (`Provider`/`ModelEntry`
-in `drcode/providers.py`, see `models.json.example` of drcode): each
-provider has a `base_url`, an `api_key` and a table of models keyed by
-model id. API keys support host-env substitution: `api_key = "env:NAME"`
-is resolved from `os.environ` when the combo is materialized — the key
-value never has to live in the file itself.
+in `drcode/src/drcode/providers.py`): each provider has a `base_url`, an
+`api_key` and a table of models keyed by model id. API keys support
+host-env substitution: `api_key = "env:NAME"` is resolved from `os.environ`
+when the combo is materialized — the key value never has to live in the
+file itself.
 
 A combo assigns a `"<provider>/<model-id>"` reference to each of the
 three agent roles drcode knows about (`AgentRole`): coding, tester,
@@ -63,10 +63,10 @@ class Combo:
     `max_context_overrides` carries the per-role `max_context_tokens`
     overrides of the combo (plan §1.2/§8): compaction scenarios S3/S4 need
     a SMALL context on the CODING model, and the override must be written
-    into the catalog entry (models.json) — the layer that beats the flat
-    config for a role (providers.resolve) — so that the run does not have
-    to depend on `DRCODE_MAX_CONTEXT_TOKENS` env (which subprocess hygiene
-    strips anyway, §13). TOML form, flat per role:
+    into the catalog entry (models.json) — the layer `providers.resolve`
+    reads a role's connection and context from — so that the run does not
+    have to depend on `DRCODE_MAX_CONTEXT_TOKENS` env (which subprocess
+    hygiene strips anyway, §13). TOML form, flat per role:
 
         [[combo]]
         name   = "..."
@@ -104,10 +104,18 @@ def _resolve_api_key(value: str) -> str:
 
 
 def parse_ref(ref: str, context: str) -> tuple[str, str]:
-    """Split `"<provider>/<model-id>"` (model ids may contain `/`)."""
+    """Split `"<provider>/<model-id>"` (exactly one `/`: drcode ≥ 0.5
+    forbids `/` in provider names and model ids — `ModelEntry`/`Provider`
+    validators — so a second `/` in a ref is a matrix error, not a model
+    id with a slash)."""
     provider, sep, model = ref.partition("/")
     if not sep or not provider or not model:
         raise MatrixError(f"invalid model reference {ref!r} ({context})")
+    if "/" in model:
+        raise MatrixError(
+            f"invalid model reference {ref!r} ({context}): '/' is not "
+            "allowed in model ids (drcode reference format)"
+        )
     return provider, model
 
 
@@ -148,8 +156,16 @@ def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
 
     providers: dict[str, ProviderSpec] = {}
     for name, raw in (data.get("providers") or {}).items():
+        # drcode ≥ 0.5 rejects "/" in provider names and model ids
+        # (`ModelEntry`/`Provider` validators); catch it here with a
+        # readable message instead of a pydantic ValidationError at
+        # catalog load time (or a silently dropped ref, `_parse_ref`).
+        if "/" in name:
+            raise MatrixError(f"{path}: provider name '{name}' must not contain '/'")
         models: dict[str, ModelSpec] = {}
         for model_id, mraw in (raw.get("models") or {}).items():
+            if "/" in model_id:
+                raise MatrixError(f"{path}: model id '{name}/{model_id}' must not contain '/'")
             models[model_id] = ModelSpec(
                 provider=name,
                 id=model_id,

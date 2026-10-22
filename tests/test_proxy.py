@@ -255,7 +255,14 @@ compaction = "fake/fake-coder"
     for provider in catalog["providers"]:
         assert provider["base_url"] == f"http://127.0.0.1:12345/p/{provider['name']}"
     project = json.loads(paths.project_config.read_text())
-    assert project["base_url"] == "http://127.0.0.1:12345/p/fake"
+    # drcode ≥ 0.5: drcode.json carries no provider fields — the proxy
+    # routing lives entirely in the catalog; the project file holds only
+    # the per-role refs (which must point at the same providers).
+    assert "base_url" not in project
+    assert set(project["models"].values()) == {
+        "fake/fake-coder",
+        "fake/fake-tester",
+    }
     # Pre-flight passes against the proxy-routed config...
     resolved = verify_resolution(
         paths.workspace,

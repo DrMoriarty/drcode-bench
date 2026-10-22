@@ -81,13 +81,15 @@ async def test_run_one_blackhole_times_out_with_diagnostics(tmp_path: Path, env_
     assert diag["state_dir_found"] is True
     assert diag["tasks"], "task JSONs must be snapshotted"
 
-    # The generated project config carries the flat coding connection
-    # (is_ready gate) AND the per-role selection.
+    # The generated project config carries ONLY the per-role selection
+    # (drcode ≥ 0.5: json layers hold no provider fields — the flat coding
+    # baseline is gone, readiness is per-role via providers.resolve).
     cfg = json.loads(
         (run_dir / "workspace" / ".drcode" / "drcode.json").read_text(encoding="utf-8")
     )
-    assert cfg["model"] == "stub-model"
-    assert cfg["base_url"] == "http://127.0.0.1:1/v1"
+    assert not [
+        k for k in cfg if k in ("model", "base_url", "api_key", "max_context_tokens", "max_tokens")
+    ]
     assert cfg["models"] == {
         "coding": "blackhole/stub-model",
         "tester": "blackhole/stub-model",

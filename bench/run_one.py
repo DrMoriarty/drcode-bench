@@ -308,9 +308,18 @@ async def _run_with_optional_proxy(
         report.dump(run_dir)
         return report
 
-    if not app.config.is_ready:
+    # drcode ≥ 0.5: json layers no longer carry provider fields, so the
+    # flat `Config` is never "ready" by itself — readiness is a PER-ROLE
+    # property of the resolution (`providers.resolve` over the project
+    # `models` refs and the user catalog). All three roles must resolve;
+    # the app's own pipeline gates on the coding role in on_mount.
+    from drcode.providers import AgentRole
+
+    not_ready = [role.value for role in AgentRole if not app.resolved_config(role).is_ready]
+    if not_ready:
         report.reason = (
-            "drcode config is not ready (no model resolvable) — check "
+            "drcode config is not ready for role(s) "
+            f"{', '.join(not_ready)} (no model resolvable) — check "
             f"{paths.project_config} and {paths.models_catalog}"
         )
         report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")

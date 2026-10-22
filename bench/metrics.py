@@ -455,8 +455,8 @@ def read_context_limits(run_dir: Path) -> dict[str, int]:
     """Effective max_context_tokens per role for a run dir (best effort,
     §1.2): `result.json.resolved_context_tokens` when the harness recorded
     it, otherwise reconstructed from the generated configs the way
-    `providers.resolve` reads them (project `models` refs → catalog entry,
-    flat config as the coding fallback). Empty dict = unknown."""
+    `providers.resolve` reads them (project `models` refs → catalog
+    entry). Empty dict = unknown."""
     run_dir = Path(run_dir)
 
     result: dict[str, Any] = {}
@@ -498,8 +498,6 @@ def read_context_limits(run_dir: Path) -> dict[str, int]:
             ctx = entries.get((provider_name, model_id))
             if ctx:
                 limits[role] = ctx
-        if "coding" not in limits and isinstance(project.get("max_context_tokens"), int):
-            limits["coding"] = int(project["max_context_tokens"])
         if limits:
             return limits
     return {}

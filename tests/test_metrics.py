@@ -653,17 +653,15 @@ def test_read_context_limits_prefers_result_json(tmp_path: Path) -> None:
 
 def test_read_context_limits_reconstructed_from_configs(tmp_path: Path) -> None:
     """Fallback: the generated configs are parsed the way providers.resolve
-    reads them (project models ref → catalog entry; flat ctx for coding)."""
+    reads them (project `models` ref → catalog entry; drcode ≥ 0.5 json
+    layers carry no provider fields, so refs→catalog is the only path)."""
     state = tmp_path / "workspace" / ".drcode"
     state.mkdir(parents=True)
     catalog_dir = tmp_path / "config-home" / "drcode"
     catalog_dir.mkdir(parents=True)
     (state / "drcode.json").write_text(
         json.dumps(
-            {
-                "max_context_tokens": 3000,
-                "models": {"coding": "p/small", "tester": "p/big"},
-            }
+            {"models": {"coding": "p/small", "tester": "p/big"}},
         ),
         encoding="utf-8",
     )

@@ -13,6 +13,17 @@ git submodule update --init --recursive   # required: uv sync fails without the 
 uv sync                                   # Python 3.12 (.python-version), creates .venv
 ```
 
+The drcode path dependency is installed **non-editable**: after
+`git submodule update --remote` a plain `uv sync` does NOT refresh the
+installed copy (site-packages keeps the old version — an e2e suite can
+look green while actually running against the previous drcode). Always
+follow submodule updates with:
+
+```bash
+uv sync --reinstall-package drcode
+uv run python -c "from importlib.metadata import version; print(version('drcode'))"
+```
+
 ## Commands
 
 ```bash
