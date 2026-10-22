@@ -90,6 +90,11 @@ class RunReport:
     # role — the pre-flight (verify_resolution) fails the run otherwise,
     # this record keeps the fact in the artifacts.
     resolved_context_tokens: dict[str, int] = field(default_factory=dict)
+    # §9 proxy mode: when the run went through the fault-injection proxy,
+    # the artifacts must say so (log path, base address, injected faults).
+    proxy_log: str | None = None
+    proxy_base: str | None = None
+    proxy_faults: dict[str, int] = field(default_factory=dict)
     tasks: list[dict[str, object]] = field(default_factory=list)
     # User simulator (§6): how many interventions it made and which
     # scenario failures it recorded (report §10 must be able to tell
@@ -169,9 +174,20 @@ def _task_summaries(manager) -> list[dict[str, object]]:
 
 
 async def run_benchmark(
-    scenario: Scenario, combo_name: str, run_dir: Path, matrix_path: Path
+    scenario: Scenario,
+    combo_name: str,
+    run_dir: Path,
+    matrix_path: Path,
+    *,
+    use_proxy: bool = False,
 ) -> RunReport:
-    """The §4 skeleton: prepare → headless DrCodeApp → briefs → settle."""
+    """The §4 skeleton: prepare → headless DrCodeApp → briefs → settle.
+
+    `use_proxy` (§9): force the proxy for a scenario without a `[proxy]`
+    section — a fault-free recording proxy (the §5-recorder alternative);
+    the scenario's own `[proxy]` section always enables it, with its
+    fault script.
+    """
     combo = get_combo(matrix_path, combo_name)
     report = RunReport(
         scenario=scenario.id,
@@ -180,10 +196,68 @@ async def run_benchmark(
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
+    # 0. §9: the fault-injection proxy starts BEFORE the run tree is
+    #    generated — the catalog's base_urls must point at its ephemeral
+    #    port. The proxy lives inside THIS process/loop: one run = one
+    #    proxy = one upstream set (no cross-run interference, §2).
+    proxy = None
+    proxy_spec = scenario.proxy
+    if proxy_spec is not None or use_proxy:
+        from .proxy import FaultProxy, ProxyError, upstreams_for_providers
+
+        providers, _ = load_matrix(matrix_path)
+        used = {
+            combo.ref(role).partition("/")[0]
+            for role in ("coding", "tester", "compaction")
+        }
+        upstreams = upstreams_for_providers(
+            {name: providers[name] for name in sorted(used)}
+        )
+        proxy = FaultProxy(
+            upstreams,
+            proxy_spec.faults if proxy_spec else (),
+            log_path=run_dir / "proxy_log.jsonl",
+            log_bodies=bool(proxy_spec.log_bodies) if proxy_spec else False,
+        )
+        try:
+            proxy_base = await proxy.start()
+        except ProxyError as e:
+            report.reason = f"pre-flight failed: proxy failed to start: {e}"
+            report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            report.dump(run_dir)
+            return report
+        report.proxy_base = proxy_base
+        report.proxy_log = str(run_dir / "proxy_log.jsonl")
+
+    # 1..7 — the run itself, with the proxy (if any) stopped in ALL exits.
+    try:
+        return await _run_with_optional_proxy(
+            scenario, combo, run_dir, matrix_path, report
+        )
+    finally:
+        if proxy is not None:
+            await proxy.stop()
+            report.proxy_faults = proxy.engine.fired_summary()
+
+
+async def _run_with_optional_proxy(
+    scenario: Scenario,
+    combo,
+    run_dir: Path,
+    matrix_path: Path,
+    report: RunReport,
+) -> RunReport:
+    """Everything after the proxy is up (§4 skeleton steps 1–7)."""
     # 1. Run tree (§3): seed copy, models.json, drcode.json, settings.json
-    #    (stall_nudge=never, completed_retention=never), git init.
+    #    (stall_nudge=never, completed_retention=never), git init. With a
+    #    proxy (§9) every generated base_url points at it.
     paths = prepare_run(
-        scenario.dir, combo, run_dir, matrix_path=matrix_path, exists_ok=True
+        scenario.dir,
+        combo,
+        run_dir,
+        matrix_path=matrix_path,
+        exists_ok=True,
+        proxy_base=report.proxy_base,
     )
     # 2. Env hygiene BEFORE drcode is imported anywhere (see docstring).
     _sanitize_own_environ(paths.config_home)
@@ -195,11 +269,16 @@ async def run_benchmark(
 
     try:
         # 3. Pre-flight (§3 end): the generated config must resolve each
-        #    role to the combo's model before any application code runs.
+        #    role to the combo's model before any application code runs —
+        #    through the proxy when one is up (§9).
         from .env_setup import verify_resolution
 
         report.resolved_roles = verify_resolution(
-            paths.workspace, paths.config_home, combo, matrix_path=matrix_path
+            paths.workspace,
+            paths.config_home,
+            combo,
+            matrix_path=matrix_path,
+            proxy_base=report.proxy_base,
         )
         from .matrix import ROLES, effective_max_context, load_matrix
 
@@ -219,7 +298,8 @@ async def run_benchmark(
     # per-request log lands in `<run_dir>/model_log.jsonl`. The recorder
     # is an observation instrument (§2), but its failure is
     # infrastructure: failing fast here beats burning the scenario
-    # timeout on an unrecorded run.
+    # timeout on an unrecorded run. (The §9 proxy is an ADDITIONAL
+    # observation point: latency cross-check, bench.metrics.)
     from .recording import install_recorder
 
     install_recorder(run_dir / "model_log.jsonl")
@@ -343,6 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("combo", help="combo name from matrix.toml (empty = first)")
     parser.add_argument("run_dir", help="directory for this run's artifacts")
     parser.add_argument("--matrix", default=str(DEFAULT_MATRIX), help="path to matrix.toml")
+    parser.add_argument(
+        "--use-proxy",
+        action="store_true",
+        help="route the run through the local proxy (§9) even when the "
+        "scenario has no [proxy] section — a fault-free recording proxy",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -360,13 +446,20 @@ def main(argv: list[str] | None = None) -> int:
 
     run_dir = Path(args.run_dir)
     try:
-        report = asyncio.run(run_benchmark(scenario, args.combo, run_dir, matrix_path))
+        report = asyncio.run(
+            run_benchmark(
+                scenario, args.combo, run_dir, matrix_path, use_proxy=args.use_proxy
+            )
+        )
     except (EnvSetupError, RunError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
     print(f"run:      {report.run_dir}")
     print(f"scenario: {report.scenario}  combo: {report.combo}")
+    if report.proxy_base:
+        faults = ", ".join(f"{k}×{v}" for k, v in report.proxy_faults.items())
+        print(f"proxy:    {report.proxy_base} (faults: {faults or 'none'})")
     if report.resolved_context_tokens:
         ctx = ", ".join(
             f"{role}={n}" for role, n in sorted(report.resolved_context_tokens.items())

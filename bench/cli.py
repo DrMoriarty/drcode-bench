@@ -50,6 +50,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         repeats=args.repeats,
         parallel=args.parallel,
         make_report=not args.no_report,
+        use_proxy=args.use_proxy,
     )
     if report_path is not None:
         print(f"report:    {report_path.resolve()}")
@@ -130,6 +131,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--runs-dir", default="runs", help="artifacts directory (default runs/)")
     run.add_argument(
         "--no-report", action="store_true", help="skip the end-of-sweep report"
+    )
+    run.add_argument(
+        "--use-proxy",
+        action="store_true",
+        help="route every run through the local proxy (§9) — scenarios "
+        "with a [proxy] section use their fault script, the rest get a "
+        "fault-free recording proxy",
     )
     run.set_defaults(func=_cmd_run)
 

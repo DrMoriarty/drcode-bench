@@ -192,7 +192,13 @@ def dump_diagnostics(run_dir: Path) -> Path:
                 }
             )
 
-    for log_name in ("model_log.jsonl", "user_sim.jsonl", "stderr.log", "stdout.log"):
+    for log_name in (
+        "model_log.jsonl",
+        "proxy_log.jsonl",
+        "user_sim.jsonl",
+        "stderr.log",
+        "stdout.log",
+    ):
         log_file = run_dir / log_name
         if not log_file.is_file():
             continue

@@ -26,7 +26,7 @@ git submodule update --init --recursive
 чистые импорты, никаких общих файлов и event loop — §2):
 
 ```bash
-# вся матрица по всем сценариям S1–S6: 2 параллельных subprocess'а,
+# вся матрица по всем сценариям S1–S7: 2 параллельных subprocess'а,
 # 3 повтора на пару (медианы/разброс в отчёте); report.md строится сам
 uv run bench run --scenario all --matrix matrix.toml --parallel 2 --repeats 3
 
@@ -42,6 +42,13 @@ uv run bench run --scenario s6_queue_priority --combo strong-coder/cheap-tester 
   Содержательный провал (таймаут, красный checks.py) — просто точка
   данных: не ретраится, попадает в отчёт (§8/§13).
 - История планировщика — `runs/runner-summary.json`.
+- Прокси-режим (этап 6, §9): `--use-proxy` гоняет трафик через локальный
+  fault-injecting прокси (`bench/proxy.py`); сценарии с секцией
+  `[proxy]` в `scenario.toml` (сейчас S7) используют свой скрипт отказов
+  (429 / обрывы / задержки, детерминированный по счётчику запросов),
+  остальные — безотказный записывающий прокси. Лог —
+  `runs/<run_id>/proxy_log.jsonl`, агрегаты и сверка латентности с
+  recorder'ом — в `metrics.json` (`proxy`, `latency_cross_check`).
 
 Одиночный прогон (этапы 1–3, §12):
 

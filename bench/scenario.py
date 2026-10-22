@@ -39,6 +39,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .proxy import ProxyError, parse_faults
+
 # Plan §7 rule: research tasks skip the tester entirely, so they can never
 # exercise the coding → testing loop the benchmark exists to measure.
 ALLOWED_KINDS = ("feature", "bug")
@@ -88,6 +90,27 @@ class ClarificationAnswer:
 
 
 @dataclass(frozen=True)
+class ProxySpec:
+    """The scenario's fault-injection proxy setup (§9): the harness starts
+    the proxy BEFORE the run tree is generated and points every provider
+    base_url at it (`env_setup.prepare_run(proxy_base=...)`).
+
+        [proxy]
+        enabled = true
+        log_bodies = false          # full request bodies into proxy_log.jsonl
+
+        [[proxy.faults]]
+        kind = "http_429"           # http_429 | drop | delay
+        nth = 1                     # 1-based over the requests matching scope
+        scope = "chat/completions"  # path substring, "" = every request
+    """
+
+    enabled: bool = True
+    log_bodies: bool = False
+    faults: tuple = ()  # tuple[FaultSpec, ...] (bench.proxy.FaultSpec)
+
+
+@dataclass(frozen=True)
 class Scenario:
     id: str
     dir: Path
@@ -96,6 +119,7 @@ class Scenario:
     settle: dict[str, object] = field(default_factory=dict)
     followups: tuple[Followup, ...] = ()
     clarification_answers: tuple[ClarificationAnswer, ...] = ()
+    proxy: ProxySpec | None = None  # §9: fault-injection proxy setup
 
     @property
     def timeout_seconds(self) -> float:
@@ -212,6 +236,29 @@ def _parse_clarification_answers(data: dict) -> tuple[ClarificationAnswer, ...]:
     return tuple(out)
 
 
+def _parse_proxy(data: dict) -> ProxySpec | None:
+    """The optional `[proxy]` section (§9): fault-injection proxy for this
+    scenario. Faults are validated here — an unknown fault kind must fail
+    the scenario load, not silently pass every request through."""
+    raw = data.get("proxy")
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ScenarioError("[proxy] must be a table")
+    try:
+        faults = parse_faults(raw.get("faults") or [])
+    except ProxyError as e:
+        raise ScenarioError(f"[proxy]: {e}") from None
+    spec = ProxySpec(
+        enabled=bool(raw.get("enabled", True)),
+        log_bodies=bool(raw.get("log_bodies", False)),
+        faults=faults,
+    )
+    if spec.faults and not spec.enabled:
+        raise ScenarioError("[proxy]: faults defined but enabled = false")
+    return spec
+
+
 def load_scenario(path: Path) -> Scenario:
     """Parse `scenarios/<id>/scenario.toml` into a `Scenario`."""
     path = Path(path)
@@ -240,6 +287,7 @@ def load_scenario(path: Path) -> Scenario:
         settle=_parse_settle(data),
         followups=_parse_followups(data),
         clarification_answers=_parse_clarification_answers(data),
+        proxy=_parse_proxy(data),
     )
 
 

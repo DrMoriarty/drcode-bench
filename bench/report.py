@@ -76,6 +76,11 @@ def _stability_flags(metrics: dict[str, Any]) -> str:
     """Compact stability signature of a run, e.g. `compact-fail×2 net×3`."""
     st = (metrics.get("totals") or {}).get("stability") or {}
     parts = []
+    # §9: the injected fault script of a proxy run belongs in the same
+    # signature — the retries it caused are visible right next to it.
+    proxy_faults = ((metrics.get("proxy") or {}).get("faults_injected")) or 0
+    if proxy_faults:
+        parts.append(f"faults×{proxy_faults}")
     for key, label in (
         ("compaction_failed", "compact-fail"),
         ("tester_failed", "tester-fail"),

@@ -312,6 +312,7 @@ def prepare_run(
     task_finalization: str = "testing",
     flat_config: dict[str, object] | None = None,
     agents_md: Path | None = None,
+    proxy_base: str | None = None,
     exists_ok: bool = False,
 ) -> RunPaths:
     """Create the full run tree for one (scenario, combo) pair and return
@@ -328,6 +329,14 @@ def prepare_run(
     - git-init's the workspace with a seed commit.
 
     `task_finalization` must be `"testing"` or `"testing_commit"`.
+
+    `proxy_base` (§9): when set (e.g. `http://127.0.0.1:PORT` — the
+    address of the run's fault-injection proxy), EVERY provider base_url
+    in the generated catalog AND in the flat config points at
+    `<proxy_base>/p/<provider-name>`; the proxy rewrites the prefix back
+    to the real upstream (bench.proxy.ProxyApp.route). The pre-flight
+    (`verify_resolution`) applies the same rewrite, so it validates the
+    exact configuration the run will use.
     """
     scenario_dir = Path(scenario_dir)
     run_dir = Path(run_dir)
@@ -361,6 +370,12 @@ def prepare_run(
     #    virtual provider clone; `refs` holds the effective role refs.
     used_providers = _providers_for_combo(combo, providers, matrix_path)
     catalog_providers, refs = materialize_providers(combo, used_providers)
+    if proxy_base:
+        # §9: every base_url the run sees goes through the proxy; the
+        # real endpoints stay in the matrix file only.
+        from .proxy import apply_proxy_base
+
+        catalog_providers = apply_proxy_base(catalog_providers, proxy_base)
     models_catalog = _write_json(
         user_drcode_dir / "models.json", build_catalog(catalog_providers, combo)
     )
@@ -461,6 +476,7 @@ def verify_resolution(
     combo: Combo,
     providers: dict[str, ProviderSpec] | None = None,
     matrix_path: Path | None = None,
+    proxy_base: str | None = None,
 ) -> dict[str, str]:
     """Pre-flight: resolve each role against the generated config and assert
     the expected model AND the expected max_context_tokens (the compaction
@@ -470,7 +486,9 @@ def verify_resolution(
     Uses `drcode.providers.resolve()` — the same precedence (env >
     project models > catalog defaults > flat config) the run will see;
     the expected refs/values come from `materialize_providers`, i.e. the
-    combo's per-role overrides included.
+    combo's per-role overrides included. With `proxy_base` set (§9) the
+    expected base_url is the proxy-routed one — the exact configuration
+    the run was generated with (`prepare_run(proxy_base=...)`).
     """
     if providers is None:
         if matrix_path is None:
@@ -478,6 +496,10 @@ def verify_resolution(
         providers, _ = load_matrix(matrix_path)
 
     catalog_providers, refs = materialize_providers(combo, providers)
+    if proxy_base:
+        from .proxy import apply_proxy_base
+
+        catalog_providers = apply_proxy_base(catalog_providers, proxy_base)
 
     import drcode.providers as dproviders
     from drcode.config import Config
@@ -514,6 +536,7 @@ def run_preflight_subprocess(
     combo: Combo,
     providers: dict[str, ProviderSpec] | None = None,
     matrix_path: Path | None = None,
+    proxy_base: str | None = None,
 ) -> dict[str, str]:
     """Pre-flight in a FRESH interpreter with the sanitized env.
 
@@ -535,6 +558,7 @@ def run_preflight_subprocess(
                 ],
             },
             "matrix_path": str(matrix_path) if matrix_path else None,
+            "proxy_base": proxy_base,
         }
     )
     result = subprocess.run(
@@ -569,6 +593,7 @@ def _preflight_main() -> int:
         ),
     )
     matrix_path = Path(spec["matrix_path"]) if spec.get("matrix_path") else None
+    proxy_base = spec.get("proxy_base") or None
     # XDG_CONFIG_HOME of this process IS the run's config-home; drcode.config
     # binds it at import time — exactly like in the real run.
     resolved = verify_resolution(
@@ -576,6 +601,7 @@ def _preflight_main() -> int:
         Path(spec["config_home"]),
         combo,
         matrix_path=matrix_path,
+        proxy_base=proxy_base,
     )
     print(json.dumps(resolved))
     return 0

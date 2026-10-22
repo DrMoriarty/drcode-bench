@@ -1,0 +1,98 @@
+# S7 — fault injection через прокси (план drcode-bench.md §9, этап 6 §12).
+#
+# Все запросы агентов идут через локальный fault-injecting прокси (§9):
+# скрипт детерминирован по счётчику запросов — три HTTP 429 подряд на
+# первых запросах к chat/completions и два обрыва соединения посреди
+# разработки. Без единой правки drcode на настоящем HTTP-слое
+# проверяются: сетевые ретраи с бэкоффом (бюджет NETWORK_RETRIES = 5,
+# drcode/src/drcode/tui/usage.py), unfinished-resume прерванной попытки
+# и финальный успех прогона.
+#
+# Нюанс HTTP-слоя (проверено и зафиксировано в скрипте): клиент openai
+# внутри pydantic-ai сам ретраит 429 (max_retries=2 → 3 попытки), поэтому
+# ДО drcode 429 доходит только когда исчерпан ЭТОТ внутренний бюджет —
+# отсюда ТРИ 429 в скрипте на первый вызов модели: первые два глотает
+# SDK, третий доходит до drcode как ModelHTTPError → его собственный
+# "Network error (...): retry 1/5". Обрывы соединения (обрезанный ответ
+# при уже начатом стриме) SDK не ретраит — они доходят до drcode
+# напрямую как ModelConnectionError.
+#
+# Событие "Network error (...): retry N/5 in X s" в events задачи,
+# unfinished-флаг (снимаемый при resume) и verbatim-исходный промпт
+# проверяет checks.py; прокси-лог и сверка источников латентности
+# попадают в metrics.json (bench.metrics.analyze_proxy /
+# latency_cross_check).
+
+id = "s7_fault_injection"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Сделайте тест зелёным (bullet_list)"
+kind = "feature"
+text = """
+В репозитории лежит formatter.py и падающий тест test_formatter.py.
+
+Исправьте функцию bullet_list() в formatter.py так, чтобы `pytest`
+проходил полностью: каждый элемент списка должен выводиться на своей
+строке с префиксом "- ". Прежде чем менять код, прочитайте инструментом
+read_file оба файла репозитория (formatter.py и test_formatter.py).
+Больше ничего не меняйте: тесты не трогать, новые файлы не добавлять.
+Когда pytest зелёный — работа закончена.
+"""
+
+[settle]
+# Settle-criterion supplement (§4): the target task must end COMPLETED
+# with the tester's PASSED label — recovery from the injected faults
+# included.
+verification = "passed"
+
+[proxy]
+# §9: весь трафик провайдера этого прогона идёт через локальный прокси.
+enabled = true
+# Полные тела запросов в proxy_log.jsonl не нужны для S7 — размер
+# истории виден в request_bytes; включать осознанно (объём артефактов).
+log_bodies = false
+
+# Скрипт отказов — детерминирован по счётчику запросов прокси (счётчик
+# учитывает и повторные запросы ретраев — и drcode, и SDK):
+#   запрос №1..№3 к chat/completions → HTTP 429: первый вызов модели
+#               кодера. SDK (max_retries=2) ретраит первые два, третий
+#               доходит до drcode → "Network error (ModelHTTPError):
+#               retry 1/5".
+#   запрос №4  → проходит: первая попытка кодера, read_file.
+#   запрос №5  → обрыв соединения посреди разработки (после первого
+#               tool-вызова: стрим уже начат → SDK не ретраит) →
+#               unfinished-попытка, "retry 1/5" (бюджет сброшен после
+#               успешного вызова).
+#   запрос №6  → проходит (retry кодера, read_file).
+#   запрос №7  → проходит (run_bash с фиксом).
+#   запрос №8  → обрыв: завершение хода кодера прерывается → снова
+#               unfinished-resume и "retry 1/5".
+#   запрос №9+ → проходят: retry кодера, тестировщик.
+# Ожидаемый итог: 3 события "Network error (...): retry N/5" (все у
+# кодера) — в рамках бюджета NETWORK_RETRIES = 5.
+
+[[proxy.faults]]
+kind = "http_429"
+nth = 1
+scope = "chat/completions"
+
+[[proxy.faults]]
+kind = "http_429"
+nth = 2
+scope = "chat/completions"
+
+[[proxy.faults]]
+kind = "http_429"
+nth = 3
+scope = "chat/completions"
+
+[[proxy.faults]]
+kind = "drop"
+nth = 5
+scope = "chat/completions"
+
+[[proxy.faults]]
+kind = "drop"
+nth = 8
+scope = "chat/completions"

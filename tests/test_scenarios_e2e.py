@@ -75,6 +75,14 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+[providers.fake.models.s7-coder]
+max_context_tokens = 100000
+max_tokens = 8192
+
+[providers.fake.models.s7-tester]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -91,6 +99,7 @@ COMBOS = {
     # real gates of drcode on the 100000-token context.
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
+    "s7_fault_injection": ("s7-coder", "s7-tester"),
 }
 
 
@@ -308,3 +317,154 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     from bench.report import generate_report
 
     generate_report(run_dir.parent)
+
+
+async def test_s7_fault_injection_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S7 (plan §9, stage 6 of §12): the run goes through the local
+    fault-injecting proxy (the generated catalog points at it, the proxy
+    forwards to the scripted gateway) — two 429s and one connection drop
+    are injected on the REAL HTTP layer, without touching drcode. The run
+    must survive: network retries in the task events (within the
+    NETWORK_RETRIES budget), the interrupted attempt resumed
+    (unfinished-resume, the brief not re-sent), final success, and the
+    proxy log in the artifacts + metrics (with the recorder latency
+    cross-check, since both sources are enabled here)."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s7_fault_injection")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+    (brief,) = report.tasks
+    assert brief["status"] == "completed"
+    assert brief["verification"] == "Verified successfully"
+
+    # §9: the run went through the proxy and the fault script fired.
+    assert report.proxy_base, "the run must report the proxy base URL"
+    proxy_log = run_dir / "proxy_log.jsonl"
+    assert proxy_log.is_file()
+    proxy_entries = read_jsonl(proxy_log)
+    faults = [e["fault"]["kind"] for e in proxy_entries if e.get("fault")]
+    # The script: three 429s (the first two are absorbed by the openai
+    # SDK's own max_retries=2 — the third reaches drcode) + two
+    # connection drops mid-development (the SDK never retries an
+    # interrupted stream).
+    assert faults == ["http_429", "http_429", "http_429", "drop", "drop"], faults
+    # The 429s never reached the gateway; the drops were answered with a
+    # truncated 200 (a transport break, not an HTTP error status); the
+    # rest were forwarded and answered 200.
+    forwarded = [e for e in proxy_entries if not e.get("fault")]
+    assert forwarded and all(e["status"] == 200 for e in forwarded)
+    assert all(
+        e["status"] in (429, 200) for e in proxy_entries if e.get("fault")
+    )
+    # Every proxied request carries a latency measurement (§9: exact
+    # timings are the proxy's second job).
+    assert all(isinstance(e["latency_ms"], int) for e in proxy_entries)
+
+    # §7 S7: the retries are in the task events, the budget was honored,
+    # and the interrupted attempt resumed.
+    raw_task = json.loads(
+        next((run_dir / "workspace" / ".drcode" / "tasks").glob("*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    retry_events = [
+        str(e.get("text", ""))
+        for e in raw_task.get("events") or []
+        if str(e.get("text", "")).startswith("Network error (")
+    ]
+    assert len(retry_events) == 3, retry_events
+    # One ModelHTTPError (the surfaced 429) + two connection drops.
+    assert any("ModelHTTPError" in e or "RateLimit" in e for e in retry_events)
+    assert retry_events.count(
+        next(e for e in retry_events if "ModelConnectionError" in e)
+    ) == 2
+    # unfinished-resume: the brief was consumed exactly once — the retry
+    # resumed the attempt instead of re-sending the prompt.
+    prompts = [
+        part["content"]
+        for msg in raw_task.get("messages") or []
+        for part in msg.get("parts") or []
+        if isinstance(part, dict)
+        and part.get("part_kind") == "user-prompt"
+        and "bullet_list" in str(part.get("content"))
+        and "Исправьте" in str(part.get("content"))
+    ]
+    assert len(prompts) == 1
+    # The persisted task ended clean: the unfinished flag was cleared by
+    # the resuming continuation turn.
+    assert raw_task.get("unfinished") is False
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    # §10: the proxy is an aggregated latency/fault source in metrics.json.
+    proxy_block = metrics["proxy"]
+    assert proxy_block["faults"] == {"http_429": 3, "drop": 2}
+    assert proxy_block["latency_ms_p50"] is not None
+    # The stability totals see the same retries the checks asserted.
+    assert metrics["totals"]["stability"]["network_retries"] == 3
+    # Both latency sources were on: the cross-check must match pairs.
+    latency_check = metrics["latency_cross_check"]
+    assert latency_check is not None
+    assert latency_check["matched"] >= 3
+    assert metrics["model_log"] is not None
+
+    # §10: the report generation must not choke on the proxy artifacts.
+    from bench.report import generate_report
+
+    generate_report(run_dir.parent)
+
+
+async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """§9: `--use-proxy` forces the proxy for a scenario WITHOUT a
+    [proxy] section — a fault-free recording proxy (the §5-recorder
+    alternative): the run goes through it untouched, the log lands in
+    the artifacts and the metrics carry both latency sources with the
+    cross-check."""
+    from tests.fake_gateway import start
+
+    server = await start(0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        combo = "s1-proxy-roles"
+        matrix_path = tmp_path / "matrix.toml"
+        matrix_path.write_text(
+            MATRIX_TEMPLATE.format(port=port, combo=combo,
+                                   coder="fake-coder", tester="fake-tester"),
+            encoding="utf-8",
+        )
+
+        import drcode.config as dconfig
+
+        run_dir = tmp_path / "runs" / "s1_happy"
+        config_home = run_dir / "config-home" / "drcode"
+        config_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(dconfig, "_USER_CONFIG_DIR", config_home)
+        monkeypatch.setattr(dconfig, "USER_CONFIG_FILE", config_home / "drcode.json")
+
+        from bench.run_one import run_benchmark
+        from bench.scenario import load_scenario_by_id
+
+        scenario = load_scenario_by_id(REPO / "scenarios", "s1_happy")
+        assert scenario.proxy is None  # no [proxy] section — forced by the flag
+        scenario = dataclasses.replace(scenario, timeout_min=3)
+        report = await run_benchmark(
+            scenario, combo, run_dir, matrix_path, use_proxy=True
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert report.ok, report.reason
+    assert report.proxy_base
+    proxy_entries = read_jsonl(run_dir / "proxy_log.jsonl")
+    assert proxy_entries
+    assert not any(e.get("fault") for e in proxy_entries)  # fault-free mode
+    # The catalog pointed at the proxy, the gateway saw the traffic.
+    assert all(e["status"] == 200 for e in proxy_entries)
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["proxy"]["requests"] == len(proxy_entries)
+    assert metrics["proxy"]["faults_injected"] == 0
+    # Both latency sources on → the cross-check matched the pairs.
+    assert metrics["latency_cross_check"]["matched"] >= 1

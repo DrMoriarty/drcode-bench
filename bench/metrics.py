@@ -1112,6 +1112,156 @@ def _load_model_log(run_dir: Path, entries: list[dict[str, Any]] | None = None) 
     }
 
 
+# --- proxy log (§9/§10) ------------------------------------------------------
+
+
+def read_proxy_log_entries(run_dir: Path) -> list[dict[str, Any]]:
+    """Raw records of `proxy_log.jsonl` (§9 proxy), corrupt lines skipped.
+    Missing file → empty list (a run without the proxy)."""
+    path = run_dir / "proxy_log.jsonl"
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def analyze_proxy(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate `proxy_log.jsonl` (§9/§10): per-model request counts and
+    latency p50/p95 (the proxy measures the SAME wall-time the recorder
+    does — request received → response complete — as an INDEPENDENT
+    source), the injected fault script replay and the upstream errors.
+
+    The faulted requests are excluded from the latency percentiles: a 429
+    answered locally is not the provider's latency."""
+    if not entries:
+        return None
+    per_model: dict[str, dict[str, Any]] = {}
+    faults: dict[str, int] = {}
+    clean_latencies: list[float] = []
+    errors = 0
+    for rec in entries:
+        model = str(rec.get("model") or "unknown")
+        entry = per_model.setdefault(
+            model, {"requests": 0, "faulted": 0, "latencies_ms": []}
+        )
+        entry["requests"] += 1
+        fault = rec.get("fault")
+        if fault:
+            kind = str(fault.get("kind") or "unknown")
+            faults[kind] = faults.get(kind, 0) + 1
+            entry["faulted"] += 1
+            continue  # a locally-answered fault says nothing about latency
+        if rec.get("error") or rec.get("status") in (502, 500):
+            errors += 1
+            continue
+        latency = rec.get("latency_ms")
+        if isinstance(latency, (int, float)):
+            entry["latencies_ms"].append(float(latency))
+            clean_latencies.append(float(latency))
+    for entry in per_model.values():
+        latencies = entry.pop("latencies_ms")
+        entry["latency_ms_p50"] = _percentile(latencies, 50)
+        entry["latency_ms_p95"] = _percentile(latencies, 95)
+    return {
+        "file": "proxy_log.jsonl",
+        "requests": len(entries),
+        "errors": errors,
+        "faults_injected": sum(faults.values()),
+        "faults": faults,
+        "per_model": per_model,
+        "latency_ms_p50": _percentile(clean_latencies, 50),
+        "latency_ms_p95": _percentile(clean_latencies, 95),
+    }
+
+
+def latency_cross_check(
+    recorder_entries: list[dict[str, Any]],
+    proxy_entries: list[dict[str, Any]],
+    *,
+    tolerance_s: float = 30.0,
+) -> dict[str, Any] | None:
+    """Сверка двух источников латентности (§9/§10), available only when
+    the run went through the proxy AND kept the §5 recorder enabled.
+
+    The proxy measures request-received → response-complete; the recorder
+    measures request-started → usage-final. The SAME HTTP request is on
+    both sides: the recorder logs one line per successful model request,
+    the proxy relays it and logs its own line. Matching pairs nearest
+    completion timestamps within `tolerance_s` (both stamps are written
+    when the response is done — the two clocks are the same host's);
+    latency deltas over the matched pairs bound the instrumentation
+    overhead itself."""
+    if not recorder_entries or not proxy_entries:
+        return None
+
+    ok_proxy = [
+        rec
+        for rec in proxy_entries
+        if not rec.get("fault") and not rec.get("error") and rec.get("status") == 200
+    ]
+    ok_rec = [rec for rec in recorder_entries if not rec.get("error")]
+
+    used = [False] * len(ok_proxy)
+    deltas: list[float] = []
+    for rec in ok_rec:
+        rec_t = rec.get("ts")
+        if not isinstance(rec_t, (int, float)):
+            continue
+        rec_lat = rec.get("latency_ms")
+        if not isinstance(rec_lat, (int, float)):
+            continue
+        best_i, best_dt = None, None
+        for i, proxy_rec in enumerate(ok_proxy):
+            if used[i]:
+                continue
+            p_t = proxy_rec.get("ts")
+            if not isinstance(p_t, (int, float)):
+                continue
+            dt = abs(p_t - rec_t)
+            if dt > tolerance_s:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_i, best_dt = i, dt
+        if best_i is not None:
+            used[best_i] = True
+            p_lat = ok_proxy[best_i].get("latency_ms")
+            if isinstance(p_lat, (int, float)):
+                deltas.append(float(p_lat) - float(rec_lat))
+    if not deltas:
+        return {
+            "tolerance_s": tolerance_s,
+            "recorder_requests": len(ok_rec),
+            "proxy_requests": len(ok_proxy),
+            "matched": 0,
+            "remark": (
+                "no recorder↔proxy pairs matched — the two sources stayed "
+                "inconsistent for this run"
+            ),
+        }
+    return {
+        "tolerance_s": tolerance_s,
+        "recorder_requests": len(ok_rec),
+        "proxy_requests": len(ok_proxy),
+        "matched": len(deltas),
+        "delta_ms_p50": _percentile(deltas, 50),
+        "delta_ms_max": round(max(abs(d) for d in deltas), 1),
+        "remark": (
+            "proxy latency − recorder latency over matched requests; a "
+            "small positive delta is the proxy's own overhead"
+        ),
+    }
+
+
 # --- user simulator log (§6/§10) --------------------------------------------
 
 # Actions of bench/user_sim.py that actually mutated task state through
@@ -1470,6 +1620,15 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             n_compactions_started=totals["n_compactions_started"],
         )
 
+    # Proxy §9 (§10): the alternative per-request latency source plus the
+    # replay of the injected fault script; when the recorder was enabled
+    # too, the two latency sources are cross-checked against each other.
+    proxy_entries = read_proxy_log_entries(run_dir)
+    proxy = analyze_proxy(proxy_entries)
+    latency_check: dict[str, Any] | None = None
+    if log_entries and proxy_entries:
+        latency_check = latency_cross_check(log_entries, proxy_entries)
+
     metrics: dict[str, Any] = {
         "schema": SCHEMA,
         "run_id": run_dir.name,
@@ -1499,6 +1658,8 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         "tester_threshold_from_coding": tester_threshold_from_coding,
         "tasks": tasks,
         "model_log": model_log,
+        "proxy": proxy,
+        "latency_cross_check": latency_check,
         "user_sim": user_sim,
         "usage_cross_check": usage_cross_check,
     }

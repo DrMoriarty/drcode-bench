@@ -115,6 +115,7 @@ class Job:
     combo: str
     repeat: int
     timeout_seconds: float
+    use_proxy: bool = False  # §9: force the proxy for scenarios without [proxy]
 
     def run_id(self, stamp: str, attempt: int) -> str:
         base = f"{stamp}-{slug(self.scenario)}-{slug(self.combo)}-rep{self.repeat}"
@@ -146,6 +147,8 @@ def plan_jobs(
     scenario_filter: str,
     combo_filter: str,
     repeats: int,
+    *,
+    use_proxy: bool = False,
 ) -> tuple[list[Job], list[Scenario], list[str]]:
     """Expand the sweep into jobs; validates the matrix and every scenario
     up front (a typo must fail the planning, not burn run slots). Returns
@@ -181,6 +184,9 @@ def plan_jobs(
             combo=combo.name,
             repeat=repeat,
             timeout_seconds=sc.timeout_seconds,
+            # §9: the scenario's own [proxy] section always wins; the
+            # runner flag forces a fault-free proxy everywhere else.
+            use_proxy=use_proxy or sc.proxy is not None,
         )
         for sc in scenarios
         for combo in combos
@@ -264,6 +270,8 @@ class Runner:
             "--matrix",
             str(self.matrix_path),
         ]
+        if job.use_proxy:
+            cmd.append("--use-proxy")
         started = time.monotonic()
         try:
             proc = subprocess.run(
@@ -391,11 +399,17 @@ def run_sweep(
     repeats: int = 3,
     parallel: int = 1,
     make_report: bool = True,
+    use_proxy: bool = False,
 ) -> tuple[list[JobOutcome], Path | None]:
     """Plan + execute the sweep, then regenerate the report (§10).
     Returns (outcomes, report path or None)."""
     jobs, _, _ = plan_jobs(
-        matrix_path, scenarios_root, scenario_filter, combo_filter, repeats
+        matrix_path,
+        scenarios_root,
+        scenario_filter,
+        combo_filter,
+        repeats,
+        use_proxy=use_proxy,
     )
     runner = Runner(matrix_path, runs_dir, parallel=parallel)
     outcomes = runner.run(jobs)

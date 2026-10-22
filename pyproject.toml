@@ -11,6 +11,11 @@ dependencies = [
     "drcode",
     "textual>=8.2.8",
     "rich>=13.0",
+    # §9 proxy mode: fault-injecting forward proxy on the real HTTP layer.
+    # uvicorn serves the raw-ASGI proxy app; httpx forwards to the upstream
+    # provider (openai already pulls both — pinned here explicitly).
+    "uvicorn>=0.30",
+    "httpx>=0.27",
     # tomllib входит в stdlib (python 3.11+), отдельная зависимость не нужна.
 ]
 

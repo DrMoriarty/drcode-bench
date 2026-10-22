@@ -60,6 +60,8 @@ MODELS = (
     "s3-coder",
     "s4-coder",
     "s4-tester",
+    "s7-coder",
+    "s7-tester",
 )
 
 
@@ -461,6 +463,38 @@ def _s4_tester_script(messages: list[dict]) -> dict:
     return _call("set_verification", {"success": True}, "call_verdict")
 
 
+# -- S7: fault injection (the proxy sits between drcode and THIS gateway) --------
+
+# formatter.py with the correct bullet prefix (the S7 coder's fix).
+S7_FIX = (
+    "printf 'def bullet_list(items):\n"
+    "    return \"\\\\n\".join(\"- \" + item for item in items)\n"
+    "' > formatter.py"
+)
+S7_READS = ["formatter.py", "test_formatter.py"]
+
+
+def _s7_coder_script(messages: list[dict]) -> dict:
+    """Coder for S7: reads BOTH seed files one by one (the brief demands
+    it), then fixes bullet_list via run_bash and ends the turn — several
+    requests before the turn completes, so the fault script's drops hit
+    MID-DEVELOPMENT.
+
+    Deliberately does NOT use _after_own_tool_call: a fault-injected run
+    RESUMES a dropped attempt whose history legitimately ends with a tool
+    result that is not this script's own call — the decision must come
+    from what the history already contains (stateless across retries)."""
+    if _called(messages, "run_bash"):
+        return _bash_end_run("bullet_list исправлен, pytest зелёный.")
+    reads = _read_paths(messages)
+    for name in S7_READS:
+        if name not in reads:
+            return _call(
+                "read_file", {"path": name}, f"call_read_{name.replace('.', '_')}"
+            )
+    return _run_bash(S7_FIX, "call_fix")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -474,6 +508,8 @@ SCRIPTS = {
     "s3-coder": _s3_coder_script,
     "s4-coder": _s4_coder_script,
     "s4-tester": _s4_tester_script,
+    "s7-coder": _s7_coder_script,
+    "s7-tester": _tester_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but
