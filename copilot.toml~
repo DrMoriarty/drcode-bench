@@ -1,0 +1,97 @@
+# Матрица моделей бенчмарка (план drcode-bench.md, §8).
+#
+# Формат провайдеров повторяет models.json.example drcode (Provider/ModelEntry
+# в src/drcode/providers.py): base_url + api_key + список моделей с
+# max_context_tokens / max_tokens / compaction_threshold.
+#
+# api_key поддерживает подстановку из окружения хоста: "env:NAME" читает
+# переменную NAME при генерации config-home/drcode/models.json. Пустая строка
+# = без ключа (локальные OpenAI-совместимые шлюзы).
+
+[providers.copilot]
+base_url = "https://api-copilot.x5.ru/aigw/v1"
+api_key  = "f10f0a76-2939-4b49-907c-f27c087d2837"
+
+[providers.copilot.models.copilot-code-large]
+max_context_tokens = 262144
+max_tokens = 16384
+
+[providers.copilot.models.x5-airun-large-thinking]
+max_context_tokens = 131072
+max_tokens = 16384
+
+[providers.copilot.models.x5-airun-medium-thinking]
+max_context_tokens = 4096
+max_tokens = 4096
+
+# Комбинации: роль → "provider/model-id". Ровно эти три роли поддерживает
+# drcode.providers.AgentRole: coding / tester / compaction.
+#
+# Обязательные «угловые» комбинации матрицы (план §8):
+#   - baseline-single-model      — все роли на одной модели (базлайн);
+#   - strong-coder/cheap-tester  — тестер слабее кодера (поймает ли он
+#                                  баг вообще); у неё кодер и тестер на
+#                                  РАЗНЫХ провайдерах — recorder-лог
+#                                  (model_log.jsonl) разделяет роли по
+#                                  тегу model@base_url, что нужно
+#                                  recorder-проверке гейта в S6;
+#   - degradation-weak-compactor — слабый компактизатор: деградация
+#                                  summary; failure компакции не роняет
+#                                  ран (защищено в drcode, бенчмарк
+#                                  подтверждает — см. отчёт §10).
+
+[[combo]]
+name       = "strong-coder/cheap-tester"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+
+[[combo]]
+name       = "baseline-single-model"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-a/qwen3-coder-30b"
+compaction = "provider-a/qwen3-coder-30b"
+
+[[combo]]
+# Маленький контекст у кодинговой модели — давление компакции на S3:
+# mid-run/turn-boundary гейты кодера считают порог от конфига кодинговой
+# модели (план §1.2). Здесь он задан отдельным id модели в каталоге
+# (qwen3-8b-small-ctx). (Для S4 малый контекст ставится роли тестера —
+# см. combo "s4-tester-compaction".)
+name       = "compaction-pressure"
+coding     = "provider-b/qwen3-8b-small-ctx"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+
+[[combo]]
+# То же самое через ПЕРЕОПРЕДЕЛЕНИЕ на роль из combo (план §1.2, этап 4):
+# coding_max_context_tokens записывается в entry каталога models.json —
+# слой, перекрывающий flat config для роли; env (DRCODE_MAX_CONTEXT_TOKENS)
+# не нужен и в прогоне всё равно вычищается (§13).
+name       = "s3-coder-small-ctx"
+coding     = "provider-b/qwen3-8b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+coding_max_context_tokens = 3000
+
+[[combo]]
+# S4: маленький контекст — у роли ТЕСТЕРА: с drcode ≥ 0.5.0 модели
+# разрешаются пер-ролево, и mid-round гейт тестера делит на конфиг
+# тестеровой модели (_fill_over_threshold(..., AgentRole.TESTER), §1.2).
+name       = "s4-tester-compaction"
+coding     = "provider-b/qwen3-8b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+tester_max_context_tokens = 3000
+
+[[combo]]
+# Деградационная combo (план §8, «слабый компактизатор»): компактизатор —
+# самая маленькая модель матрицы; summary ожидаемо хуже, возможны
+# «compaction failed» / повторные компакции. drcode обязан переживать это
+# без падения прогона (gate отключается, ран идёт несжатым) — бенчмарк
+# распознаёт состояние и отмечает его в отчёте (§1.2, §10).
+name       = "degradation-weak-compactor"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-a/qwen3-coder-30b"
+compaction = "provider-b/qwen3-8b-small-ctx"
+compaction_max_context_tokens = 4096

@@ -7,6 +7,10 @@ host-env substitution: `api_key = "env:NAME"` is resolved from `os.environ`
 when the combo is materialized — the key value never has to live in the
 file itself.
 
+A model table key is normally the wire name too; an optional `model` field
+turns the key into a local alias for a real provider model (`ModelSpec`,
+§8) — materialized into a virtual provider by `env_setup.materialize_providers`.
+
 A combo assigns a `"<provider>/<model-id>"` reference to each of the
 three agent roles drcode knows about (`AgentRole`): coding, tester,
 compaction.
@@ -28,13 +32,36 @@ class MatrixError(ValueError):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """One model of a provider, as written in matrix.toml."""
+    """One model of a provider, as written in matrix.toml.
+
+    `model` (optional, §8) is the REAL model name at the provider; the
+    table key (`id`) then acts only as a local alias — e.g. one provider
+    model described twice with different context caps
+    (`[models.qwen3-8b-small-ctx]` with `model = "qwen3-8b"`). Empty
+    (default) means the table key IS the wire name, as before — drcode
+    sends the catalog id to the provider verbatim, so an alias entry is
+    materialized into a virtual provider by
+    `env_setup.materialize_providers` (§1.2 mechanism reuse).
+    """
 
     provider: str
     id: str
     max_context_tokens: int = 200_000
     max_tokens: int | None = None
     compaction_threshold: int | None = None
+    model: str = ""
+
+    @property
+    def wire_name(self) -> str:
+        """The model name the provider actually receives in API requests:
+        the explicit `model` when set, otherwise the catalog id itself."""
+        return self.model or self.id
+
+    @property
+    def is_alias(self) -> bool:
+        """True when the table key is only a local alias (`model` set and
+        different from `id`)."""
+        return bool(self.model) and self.model != self.id
 
 
 @dataclass(frozen=True)
@@ -170,12 +197,28 @@ def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
         for model_id, mraw in (raw.get("models") or {}).items():
             if "/" in model_id:
                 raise MatrixError(f"{path}: model id '{name}/{model_id}' must not contain '/'")
+            # Optional `model` field (§8): the real wire name behind a
+            # local alias. Same reference format rules as the table key:
+            # non-empty, no '/' (drcode `ModelEntry.id` validator).
+            wire = mraw.get("model")
+            if wire is not None:
+                wire = str(wire)
+                if not wire:
+                    raise MatrixError(
+                        f"{path}: model '{name}/{model_id}': 'model' must not be empty"
+                    )
+                if "/" in wire:
+                    raise MatrixError(
+                        f"{path}: model '{name}/{model_id}': wire name '{wire}' must "
+                        "not contain '/' (drcode reference format)"
+                    )
             models[model_id] = ModelSpec(
                 provider=name,
                 id=model_id,
                 max_context_tokens=int(mraw.get("max_context_tokens", 200_000)),
                 max_tokens=mraw.get("max_tokens"),
                 compaction_threshold=mraw.get("compaction_threshold"),
+                model=wire or "",
             )
         providers[name] = ProviderSpec(
             name=name,

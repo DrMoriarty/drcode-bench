@@ -43,12 +43,13 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .matrix import (
     ROLES,
     Combo,
+    ModelSpec,
     ProviderSpec,
     _resolve_api_key,
     effective_max_context,
@@ -112,13 +113,26 @@ def materialize_providers(
     combo: Combo,
     providers: dict[str, ProviderSpec],
 ) -> tuple[dict[str, ProviderSpec], dict[str, tuple[str, str]]]:
-    """Apply the combo's per-role `max_context_tokens` overrides (§1.2) to
-    the provider catalog and return the materialized providers plus the
-    effective role refs.
+    """Apply two catalog-level transformations (§1.2/§8) to the combo's
+    providers and return the materialized providers plus the effective
+    role refs.
+
+    ALIAS entries (§8, `model` field in matrix.toml): drcode sends the
+    catalog id to the provider verbatim, so a table key that is only a
+    local alias cannot stay in the catalog. It is materialized into the
+    virtual-provider form — a new provider `<provider>--<alias>` with the
+    same base_url/api_key and a single entry `id = <real wire name>`
+    carrying the alias's caps — and the role ref is rewritten
+    `provider/alias` → `<provider>--<alias>/<wire>`. The generated
+    catalog then contains only names the provider actually serves
+    (recorder/model_log show the real model); roles sharing an alias
+    share one virtual provider.
+
+    Per-role `max_context_tokens` overrides (§1.2):
 
     - No override (or an override equal to the catalog value): the role
-      keeps its original ref — the happy path of every non-compaction
-      combo.
+      keeps its (possibly rewritten) ref — the happy path of every
+      non-compaction combo.
     - An override on a (provider, model) pair NOT shared with a role that
       needs a different value: the catalog entry is patched in place —
       `providers.resolve` copies `max_context_tokens` from the entry into
@@ -138,14 +152,48 @@ def materialize_providers(
     layer drcode honors per role.
     """
     refs: dict[str, tuple[str, str]] = {}
-    wants: dict[tuple[str, str], dict[int, list[str]]] = {}
+    ctxs: dict[str, int] = {}
     for role in ROLES:
         provider_name, model_id = parse_ref(combo.ref(role), f"combo '{combo.name}' role {role}")
         refs[role] = (provider_name, model_id)
-        ctx = effective_max_context(combo, providers, role)
-        wants.setdefault((provider_name, model_id), {}).setdefault(ctx, []).append(role)
+        ctxs[role] = effective_max_context(combo, providers, role)
 
     out = {name: providers[name] for name in providers}
+
+    # -- alias entries → virtual providers (§8) ---------------------------------
+    # Keys of `vnames`: (original provider, alias id) — deterministic, so
+    # roles sharing an alias land on the same virtual provider.
+    vnames: dict[tuple[str, str], str] = {}
+    for role in ROLES:
+        provider_name, model_id = refs[role]
+        model = providers[provider_name].model(model_id)
+        if not model.is_alias:
+            continue
+        key = (provider_name, model_id)
+        vname = vnames.get(key)
+        if vname is None:
+            base = providers[provider_name]
+            # Collision with an existing provider name (or a previously
+            # generated one): suffix like the ctx-clone branch below.
+            vname = f"{provider_name}--{model_id}"
+            suffix = 2
+            while vname in out:
+                vname = f"{provider_name}--{model_id}-{suffix}"
+                suffix += 1
+            vnames[key] = vname
+            out[vname] = ProviderSpec(
+                name=vname,
+                base_url=base.base_url,
+                api_key=base.api_key,
+                models={model.wire_name: replace(model, id=model.wire_name)},
+            )
+        refs[role] = (vname, model.wire_name)
+
+    # -- per-role max_context_tokens overrides (§1.2) ---------------------------
+    wants: dict[tuple[str, str], dict[int, list[str]]] = {}
+    for role in ROLES:
+        wants.setdefault(refs[role], {}).setdefault(ctxs[role], []).append(role)
+
     for (provider_name, model_id), by_ctx in wants.items():
         if len(by_ctx) == 1:
             (ctx, _) = next(iter(by_ctx.items()))
@@ -173,26 +221,34 @@ def materialize_providers(
             out[clone_name] = _spec_with_model(spec, spec.model(model_id), ctx, clone_name)
             for role in roles:
                 refs[role] = (clone_name, model_id)
+
+    # The catalog carries only real wire names: alias entries were
+    # materialized into virtual providers above, so strip them from the
+    # original specs (and drop providers left with no models at all —
+    # nothing references them anymore).
+    out = {
+        name: replace(spec, models={m: e for m, e in spec.models.items() if not e.is_alias})
+        for name, spec in out.items()
+    }
+    out = {name: spec for name, spec in out.items() if spec.models}
     return out, refs
 
 
 def _spec_with_model(
     spec: ProviderSpec,
-    model: object,
+    model: ModelSpec,
     max_context_tokens: int,
     name: str | None = None,
 ) -> ProviderSpec:
     """A copy of `spec` whose entry for `model.id` carries the given
     max_context_tokens (single-model copy when `name` is given — the
     virtual-provider form)."""
-    from dataclasses import replace
-
-    new_model = replace(model, max_context_tokens=max_context_tokens)  # type: ignore[arg-type]
+    new_model = replace(model, max_context_tokens=max_context_tokens)
     if name is None:
         models = dict(spec.models)
-        models[model.id] = new_model  # type: ignore[index]
+        models[model.id] = new_model
         return replace(spec, models=models)
-    return replace(spec, name=name, models={model.id: new_model})  # type: ignore[dict-item]
+    return replace(spec, name=name, models={model.id: new_model})
 
 
 def _providers_for_combo(

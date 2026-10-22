@@ -382,6 +382,21 @@ max_tokens = 16384
 base_url = "http://localhost:8080/v1"
 api_key  = ""
 
+# Алиасная запись: ключ таблицы — локальный алиас, `model` — реальное имя
+# модели у провайдера (default = ключу таблицы). Позволяет описать одну
+# модель провайдера дважды с разными капами контекста: при материализации
+# combo запись превращается в виртуального провайдера
+# `provider-b--qwen3-8b-small-ctx` (тот же base_url/api_key, одна запись
+# id = "qwen3-8b" с капами алиаса), а ref роли переписывается
+# `provider-b/qwen3-8b-small-ctx` → `provider-b--qwen3-8b-small-ctx/qwen3-8b`.
+# В сгенерированных models.json / drcode.json только настоящие wire-имена —
+# провайдер получает ровно те имена, которые у него есть, а recorder /
+# model_log показывают реальную модель.
+[providers.provider-b.models.qwen3-8b-small-ctx]
+model = "qwen3-8b"
+max_context_tokens = 4096
+max_tokens = 4096
+
 [[combo]]
 name    = "strong-coder/cheap-tester"
 coding     = "provider-a/qwen3-coder-30b"

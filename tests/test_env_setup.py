@@ -392,3 +392,164 @@ def test_verify_resolution_asserts_context_override(
         verify_resolution(
             paths.workspace, paths.config_home, small, matrix_path=override_matrix_file
         )
+
+
+# -- alias entries (`model` field, plan §8) ---------------------------------------
+
+ALIAS_MATRIX = """\
+[providers.fake-b]
+base_url = "http://fake-b.local:9001/v1"
+api_key  = "env:FAKE_B_KEY"
+
+[providers.fake-b.models.small-8b]
+max_context_tokens = 8192
+max_tokens = 2048
+
+[providers.fake-b.models.small-8b-tiny-ctx]
+model = "small-8b"
+max_context_tokens = 4096
+max_tokens = 4096
+
+[[combo]]
+name       = "alias-coding"
+coding     = "fake-b/small-8b-tiny-ctx"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+
+[[combo]]
+name       = "shared-alias"
+coding     = "fake-b/small-8b-tiny-ctx"
+tester     = "fake-b/small-8b-tiny-ctx"
+compaction = "fake-b/small-8b"
+
+[[combo]]
+name       = "alias-with-override"
+coding     = "fake-b/small-8b-tiny-ctx"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b-tiny-ctx"
+compaction_max_context_tokens = 1000
+"""
+
+
+@pytest.fixture
+def alias_matrix_file(tmp_path: Path) -> Path:
+    path = tmp_path / "matrix.toml"
+    path.write_text(ALIAS_MATRIX, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def alias_combo(alias_matrix_file: Path) -> Combo:
+    _providers, combos = load_matrix(alias_matrix_file)
+    return next(c for c in combos if c.name == "alias-coding")
+
+
+def test_materialize_alias_becomes_virtual_provider(alias_matrix_file: Path, monkeypatch) -> None:
+    """An alias entry (§8) is materialized into a virtual provider
+    `<provider>--<alias>`: same base_url/api_key, a single entry keyed by
+    the REAL wire name with the alias's caps; the role ref is rewritten."""
+    from bench.env_setup import materialize_providers
+
+    monkeypatch.setenv("FAKE_B_KEY", "sk-b")
+    providers, combos = load_matrix(alias_matrix_file)
+    combo = next(c for c in combos if c.name == "alias-coding")
+    materialized, refs = materialize_providers(combo, providers)
+
+    vname = "fake-b--small-8b-tiny-ctx"
+    assert refs["coding"] == (vname, "small-8b")
+    # Non-alias roles keep their refs.
+    assert refs["tester"] == ("fake-b", "small-8b")
+
+    virtual = materialized[vname]
+    assert virtual.base_url == providers["fake-b"].base_url
+    assert virtual.api_key == "env:FAKE_B_KEY"  # resolved later, in build_catalog
+    assert list(virtual.models) == ["small-8b"]
+    entry = virtual.model("small-8b")
+    assert entry.max_context_tokens == 4096
+    assert entry.max_tokens == 4096
+
+    # The original provider no longer carries the alias entry — the
+    # catalog contains only names the provider actually serves.
+    assert "small-8b-tiny-ctx" not in materialized["fake-b"].models
+    assert "small-8b" in materialized["fake-b"].models
+
+
+def test_materialize_shared_alias_reuses_one_virtual_provider(
+    alias_matrix_file: Path,
+) -> None:
+    """Roles sharing an alias share one virtual provider — no clones."""
+    from bench.env_setup import materialize_providers
+
+    providers, combos = load_matrix(alias_matrix_file)
+    combo = next(c for c in combos if c.name == "shared-alias")
+    materialized, refs = materialize_providers(combo, providers)
+    vname = "fake-b--small-8b-tiny-ctx"
+    assert refs["coding"] == refs["tester"] == (vname, "small-8b")
+    assert refs["compaction"] == ("fake-b", "small-8b")
+    assert sum(1 for name in materialized if name.startswith("fake-b--")) == 1
+
+
+def test_materialize_alias_with_ctx_override(alias_matrix_file: Path) -> None:
+    """A combo ctx override on top of an alias: the virtual provider's
+    entry is patched (no conflict) or cloned (conflict) — exactly like the
+    §1.2 mechanism on a plain entry."""
+    from bench.env_setup import materialize_providers
+
+    providers, combos = load_matrix(alias_matrix_file)
+    combo = next(c for c in combos if c.name == "alias-with-override")
+    materialized, refs = materialize_providers(combo, providers)
+    vname = "fake-b--small-8b-tiny-ctx"
+    # coding keeps the alias's catalog ctx (4096) on the virtual provider…
+    assert refs["coding"] == (vname, "small-8b")
+    assert materialized[vname].model("small-8b").max_context_tokens == 4096
+    # …compaction (override 1000) gets a ctx-clone of the virtual provider.
+    clone_name = refs["compaction"][0]
+    assert clone_name.startswith(vname + "--ctx")
+    assert materialized[clone_name].model("small-8b").max_context_tokens == 1000
+    assert materialized[clone_name].base_url == providers["fake-b"].base_url
+
+
+def test_prepare_run_catalog_carries_only_wire_names(
+    alias_matrix_file: Path, scenario_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Generated models.json / drcode.json: only real wire names — the
+    provider never sees an alias in an API request."""
+    monkeypatch.setenv("FAKE_B_KEY", "sk-b")
+    _providers, combos = load_matrix(alias_matrix_file)
+    combo = next(c for c in combos if c.name == "alias-coding")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "al", matrix_path=alias_matrix_file
+    )
+
+    catalog = json.loads(paths.models_catalog.read_text(encoding="utf-8"))
+    names = sorted(p["name"] for p in catalog["providers"])
+    assert names == ["fake-b", "fake-b--small-8b-tiny-ctx"]
+    virtual = next(p for p in catalog["providers"] if p["name"].startswith("fake-b--"))
+    assert [m["id"] for m in virtual["models"]] == ["small-8b"]
+    assert virtual["models"][0]["max_context_tokens"] == 4096
+    assert virtual["api_key"] == "sk-b"
+
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    assert project["models"]["coding"] == "fake-b--small-8b-tiny-ctx/small-8b"
+    assert project["models"]["tester"] == "fake-b/small-8b"
+
+
+def test_verify_resolution_with_alias(
+    alias_matrix_file: Path, scenario_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Pre-flight resolves the rewritten ref and reports the real wire
+    name — what recorder/model_log will show."""
+    monkeypatch.setenv("FAKE_B_KEY", "sk-b")
+    _providers, combos = load_matrix(alias_matrix_file)
+    combo = next(c for c in combos if c.name == "alias-coding")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "pfal", matrix_path=alias_matrix_file
+    )
+    resolved = verify_resolution(
+        paths.workspace, paths.config_home, combo, matrix_path=alias_matrix_file
+    )
+    assert resolved == {
+        "coding": "fake-b--small-8b-tiny-ctx/small-8b",
+        "tester": "fake-b/small-8b",
+        "compaction": "fake-b/small-8b",
+    }

@@ -25,6 +25,12 @@ max_context_tokens = 131072
 max_tokens = 8192
 
 [providers.provider-b.models.qwen3-8b-small-ctx]
+# Алиасная запись (план §8): ключ таблицы — локальное имя записи каталога,
+# `model` — реальное имя модели у провайдера (именно оно уходит в
+# API-запрос). При материализации превращается в виртуального провайдера
+# provider-b--qwen3-8b-small-ctx с одной записью id = "qwen3-8b" — так одна
+# модель провайдера может быть описана дважды с разными капами контекста.
+model = "qwen3-8b"
 max_context_tokens = 4096
 max_tokens = 4096
 
@@ -59,9 +65,10 @@ compaction = "provider-a/qwen3-coder-30b"
 [[combo]]
 # Маленький контекст у кодинговой модели — давление компакции на S3:
 # mid-run/turn-boundary гейты кодера считают порог от конфига кодинговой
-# модели (план §1.2). Здесь он задан отдельным id модели в каталоге
-# (qwen3-8b-small-ctx). (Для S4 малый контекст ставится роли тестера —
-# см. combo "s4-tester-compaction".)
+# модели (план §1.2). Здесь он задан алиасной записью каталога
+# (qwen3-8b-small-ctx → model = "qwen3-8b", материализуется в виртуального
+# провайдера provider-b--qwen3-8b-small-ctx; план §8). (Для S4 малый
+# контекст ставится роли тестера — см. combo "s4-tester-compaction".)
 name       = "compaction-pressure"
 coding     = "provider-b/qwen3-8b-small-ctx"
 tester     = "provider-b/qwen3-8b"
