@@ -62,6 +62,9 @@ reportMissingImports = true
 [tool.uv.sources]
 drcode = { path = "drcode" }
 
+[project.scripts]
+bench = "bench.cli:main"
+
 [build-system]
 requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
