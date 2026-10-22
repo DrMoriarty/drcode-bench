@@ -141,7 +141,11 @@ def run_checks(scenario: Scenario, workspace: Path) -> tuple[bool | None, str]:
     """Run the scenario's mechanical correctness check (§7): the verdict
     is never built on the agents' words. `checks.py <workspace>` exit 0 =
     green. No checks.py → None (nothing to assert mechanically)."""
-    checks = scenario.checks_file
+    # Resolve both paths to absolute: the child runs with cwd=workspace, so a
+    # relative workspace argument would be re-resolved against the workspace
+    # itself and fail with FileNotFoundError.
+    checks = scenario.checks_file.resolve()
+    workspace = workspace.resolve()
     if not checks.is_file():
         return None, ""
     result = subprocess.run(
