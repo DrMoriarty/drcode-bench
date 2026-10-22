@@ -838,6 +838,178 @@ def analyze_task(
     }
 
 
+# --- the development/testing gate (§7 S6) ----------------------------------
+
+
+def _ts_interval(messages: list[dict[str, Any]]):
+    """(start, end) over the timestamps of one transcript; None without
+    any stamps."""
+    stamps = [t for m in messages if (t := message_time(m))]
+    if not stamps:
+        return None
+    return (min(stamps), max(stamps))
+
+
+def analyze_gate(
+    raw_tasks: list[dict[str, Any]],
+    log_entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The pipeline gate «no development while testing is in flight»
+    (§2/§7 S6): coder and tester must never be in flight simultaneously.
+
+    Two independent sources:
+
+    - transcripts (always available): a coder message timestamp strictly
+      INSIDE a tester round's [start, end] interval — a span-vs-span
+      comparison would false-bite, because one task's coder transcript
+      legitimately spans the gaps where its own failed testing round ran
+      before a follow-up;
+    - the recorder log (§5, when the roles are distinguishable by model
+      tag): per-request intervals [ts − latency, ts] of coder-tag vs
+      tester-tag entries must not overlap. Tags are mapped to roles by
+      matching recorder entries against persisted transcript responses
+      (same token pair, §10 cross-check); unmatched entries (the
+      compaction agent's, §1.5) never vote and never count.
+
+    verdict: "ok" | "OVERLAP" | "no-testing" | "unknown".
+    """
+    tester_rounds: list[tuple[str, tuple[datetime, datetime]]] = []
+    coder_points: list[tuple[str, datetime]] = []
+    for raw in raw_tasks:
+        label = f"{raw.get('kind')}:{raw.get('title')}"
+        for i, rnd in enumerate(raw.get("tester_messages") or []):
+            iv = _ts_interval(rnd)
+            if iv:
+                tester_rounds.append((f"{label} round {i}", iv))
+        for msg in raw.get("messages") or []:
+            ts = message_time(msg)
+            if ts:
+                coder_points.append((label, ts))
+
+    overlaps: list[dict[str, Any]] = []
+    for tlabel, (start, end) in tester_rounds:
+        for clabel, ts in coder_points:
+            if start < ts < end:
+                overlaps.append(
+                    {
+                        "source": "transcripts",
+                        "coder": clabel,
+                        "tester": tlabel,
+                        "at": dt_or(ts),
+                        "detail": (
+                            f"coder message at {dt_or(ts)} inside tester "
+                            f"interval {dt_or(start)}…{dt_or(end)}"
+                        ),
+                    }
+                )
+
+    recorder_checked = False
+    if log_entries and tester_rounds:
+        # Tag → role votes: a recorder entry matched to a persisted
+        # transcript response (same token pair) inherits that response's
+        # source (coder/tester, see transcript_responses).
+        responses: list[tuple[str, datetime | None, int, int]] = []
+        for raw in raw_tasks:
+            for r in transcript_responses(raw):
+                responses.append(
+                    (r["source"], parse_ts(r["ts"]), r["input_tokens"], r["output_tokens"])
+                )
+        votes: dict[str, set[str]] = {}
+        matched: set[int] = set()
+        for i, rec in enumerate(log_entries):
+            if rec.get("error"):
+                continue
+            usage = rec.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            in_toks = int(usage.get("input_tokens") or 0)
+            out_toks = int(usage.get("output_tokens") or 0)
+            if not in_toks and not out_toks:
+                continue
+            rec_t = rec.get("ts")
+            rec_dt = (
+                datetime.fromtimestamp(rec_t, tz=timezone.utc)
+                if isinstance(rec_t, (int, float))
+                else parse_ts(rec_t)
+            )
+            for source, resp_t, r_in, r_out in responses:
+                if r_in != in_toks or r_out != out_toks:
+                    continue
+                if (
+                    rec_dt is not None
+                    and resp_t is not None
+                    and abs((rec_dt - resp_t).total_seconds()) > 60.0
+                ):
+                    continue
+                matched.add(i)
+                tag = str(rec.get("role") or "")
+                if tag:
+                    votes.setdefault(tag, set()).add(source)
+                break
+        role_of = {t: next(iter(r)) for t, r in votes.items() if len(r) == 1}
+        coder_tags = {t for t, r in role_of.items() if r == "coder"}
+        tester_tags = {t for t, r in role_of.items() if r == "tester"}
+        if coder_tags and tester_tags:
+            recorder_checked = True
+            coder_iv: list[tuple[str, tuple[datetime, datetime]]] = []
+            tester_iv: list[tuple[str, tuple[datetime, datetime]]] = []
+            for i, rec in enumerate(log_entries):
+                if i not in matched or rec.get("error"):
+                    continue  # compaction traffic (§1.5) has no phase of its own
+                tag = str(rec.get("role") or "")
+                ts, latency = rec.get("ts"), rec.get("latency_ms")
+                if not isinstance(ts, (int, float)) or not isinstance(
+                    latency, (int, float)
+                ):
+                    continue
+                end = datetime.fromtimestamp(ts, tz=timezone.utc)
+                iv = (datetime.fromtimestamp(ts - latency / 1000.0, tz=timezone.utc), end)
+                if tag in coder_tags:
+                    coder_iv.append((tag, iv))
+                elif tag in tester_tags:
+                    tester_iv.append((tag, iv))
+            for clabel, (c0, c1) in coder_iv:
+                for tlabel, (t0, t1) in tester_iv:
+                    start, end = max(c0, t0), min(c1, t1)
+                    if end > start:
+                        overlaps.append(
+                            {
+                                "source": "recorder",
+                                "coder": clabel,
+                                "tester": tlabel,
+                                "at": dt_or(start),
+                                "detail": (
+                                    f"recorder request intervals overlap by "
+                                    f"{(end - start).total_seconds() * 1000:.0f} ms "
+                                    f"({dt_or(start)}…{dt_or(end)})"
+                                ),
+                            }
+                        )
+
+    if overlaps:
+        verdict = "OVERLAP"
+    elif tester_rounds:
+        verdict = "ok"
+    elif raw_tasks:
+        verdict = "no-testing"
+    else:
+        verdict = "unknown"
+    return {
+        "verdict": verdict,
+        "sources": (
+            ["transcripts", "recorder"] if recorder_checked else ["transcripts"]
+        ),
+        "n_tester_rounds": len(tester_rounds),
+        "n_coder_messages": len(coder_points),
+        "overlaps": overlaps,
+        "remark": (
+            "coder activity must never intersect tester activity (the "
+            "_advance gate, §2/§7 S6); the recorder check applies only "
+            "when the roles are distinguishable by model tag"
+        ),
+    }
+
+
 # --- run-level extraction -------------------------------------------------
 
 
@@ -1280,6 +1452,11 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
     else:
         tester_threshold_from_coding = None  # only unclassified observations
 
+    # The development/testing gate (§7 S6): coder and tester never in
+    # flight at the same time — transcripts first, recorder log on top
+    # when the roles are distinguishable by model tag.
+    gate = analyze_gate(raw_tasks, log_entries)
+
     # Recorder §5 (§10): per-role requests/latency/tokens, plus the
     # cross-check of the recorder's billing against the usage persisted
     # in the task transcripts (compaction responses are not persisted —
@@ -1317,6 +1494,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         },
         "totals": totals,
         "bug_round_trips": bug_round_trips,
+        "gate": gate,
         "context_limits": context_limits or None,
         "tester_threshold_from_coding": tester_threshold_from_coding,
         "tasks": tasks,

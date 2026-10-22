@@ -1,0 +1,50 @@
+# S6 — queue priority + the development/testing gate (plan §7, stage 5
+# of §12). A feature and a bug brief are queued SIMULTANEOUSLY; the
+# assertions are:
+#
+#   1. activation order by activated_at: the bug is at the head of the
+#      queue (TaskManager.queued() sorts bugs newest-first) and is
+#      activated before the feature brief;
+#   2. the tester never intersects with the coder — the pipeline gate
+#      "no development while testing is in flight" (§7): verified
+#      mechanically from the persisted transcripts/events and, when the
+#      recorder log distinguishes the roles, from model_log.jsonl too;
+#   3. both briefs end COMPLETED with verification=PASSED and the seed
+#      contract (pytest) is green.
+
+id = "s6_queue_priority"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Реализуйте stdev()"
+kind = "feature"
+text = """
+В stats.py реализуйте функцию stdev(nums) — population-стандартное
+отклонение: квадратный корень из средней квадратов отклонений от среднего.
+Проверка: `pytest test_stdev.py` должен быть зелёным.
+
+Функции mean() и median() НЕ трогайте: median() чинится отдельной задачей
+(она уже в очереди) — её поломанность вне объёма этой задачи.
+
+ТЕСТИРОВЩИКУ: если полный pytest красный только из-за median()
+(вне объёма этой задачи) — ставьте set_verification(success=True):
+объём ЭТОЙ задачи — только stdev().
+"""
+
+[[briefs]]
+title = "Почините median() для чётной длины"
+kind = "bug"
+text = """
+В stats.py функция median() для списка чётной длины возвращает верхнее
+среднее значение вместо среднего двух центральных: median([1, 2, 3, 4])
+возвращает 3.0, а должна 2.5 (тест test_median_even красный).
+
+Исправьте ТОЛЬКО median(). Функцию stdev() не создавайте и не трогайте:
+она вне объёма этой задачи (её реализует другая задача из очереди).
+Проверьте себя точечно: `pytest test_stats.py` должен быть зелёным.
+"""
+
+[settle]
+# Both briefs must end COMPLETED with the tester's PASSED label; the
+# queue-priority and gate assertions are mechanical (checks.py).
+verification = "passed"

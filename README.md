@@ -19,20 +19,29 @@ uv sync                     # создаст .venv, поставит drcode (с�
 git submodule update --init --recursive
 ```
 
-## Запуск (плейсхолдеры — этап 1, §12 п.1)
+## Запуск
+
+Матричный раннер (этап 5, план §8/§12): `scenarios × combos × repeats`,
+один сценарий — один subprocess (изоляция `XDG_CONFIG_HOME`/`DRCODE_*`,
+чистые импорты, никаких общих файлов и event loop — §2):
 
 ```bash
-# прогон сценария на комбинации моделей из matrix.toml
-uv run bench run --scenario s1_happy --combo baseline-single-model --matrix matrix.toml
+# вся матрица по всем сценариям S1–S6: 2 параллельных subprocess'а,
+# 3 повтора на пару (медианы/разброс в отчёте); report.md строится сам
+uv run bench run --scenario all --matrix matrix.toml --parallel 2 --repeats 3
 
-# агрегированный отчёт по прогонам
-uv run bench report runs/
+# один сценарий / одна комбинация
+uv run bench run --scenario s6_queue_priority --combo strong-coder/cheap-tester --repeats 1
 ```
 
-Подкоманды `run` / `report` на этапе 1 — заглушки: каркас CLI и
-подготовка среды (`bench/env_setup.py`) уже работают, оркестратор
-прогона (`bench/run_one.py`, headless `DrCodeApp`) подключается на
-следующем этапе.
+- `--parallel` ограничивает одновременные subprocess'ы (rate limits
+  провайдера / VRAM для локальных шлюзов).
+- Инфраструктурные сбои (subprocess упал ДО старта приложения,
+  недоступный провайдер на старте, pre-flight) повторяются: сначала
+  перепроверка конфига, потом новый прогон в свежем `runs/<run_id>/`.
+  Содержательный провал (таймаут, красный checks.py) — просто точка
+  данных: не ретраится, попадает в отчёт (§8/§13).
+- История планировщика — `runs/runner-summary.json`.
 
 Одиночный прогон (этапы 1–3, §12):
 
@@ -45,18 +54,29 @@ python -m bench.run_one s2a_bug_followup strong-coder/cheap-tester runs/s2a-r1
 # вмешательства пишутся в runs/<run_id>/user_sim.jsonl
 ```
 
+Отчёт (§10): таблица combo × scenario — медиана wall-time, медиана/сумма
+токенов per role, вердикт, число компакций, разброс по повторам
+(min…max), колонка гейта «никакой девелопмент, пока идёт testing» (§7
+S6); каждая ячейка кликабельно ссылается на `runs/<run_id>/`:
+
+```bash
+uv run bench report runs/            # → runs/report.md
+uv run bench report runs/ --html     # + runs/report.html
+```
+
 ## Структура
 
 ```
 ├── matrix.toml          # провайдеры + комбинации моделей по ролям (§8)
 ├── bench/
 │   ├── __main__.py      # CLI: run / report
+│   ├── runner.py        # матричный раннер: план → параллельные subprocess'ы (§8)
 │   ├── run_one.py       # один прогон: env → DrCodeApp headless → settle (§4)
 │   ├── recording.py     # recording-обёртка build_model (§5)
 │   ├── user_sim.py      # симулятор пользователя (§6)
 │   ├── settle.py        # критерий завершения + диагностика провала (§4)
 │   ├── metrics.py       # парсинг .drcode/tasks/*.json + логов (§10)
-│   └── report.py        # агрегация → markdown (§10)
+│   └── report.py        # агрегация → markdown/HTML (§10)
 ├── scenarios/           # сценарии: seed/ + scenario.toml + checks.py (§7)
 ├── drcode/              # субмодуль — исходники drcode
 └── runs/                # артефакты прогонов (gitignored)

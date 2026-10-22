@@ -86,6 +86,21 @@ def make_workspace(tmp_path: Path, scenario_id: str, *, fix: bool) -> Path:
                 '    return f"{body} {symbol}"\n',
                 encoding="utf-8",
             )
+        elif scenario_id == "s6_queue_priority":
+            (workspace / "stats.py").write_text(
+                "def mean(nums):\n"
+                "    return sum(nums) / len(nums)\n\n"
+                "def median(nums):\n"
+                "    ordered = sorted(nums)\n"
+                "    n = len(ordered)\n"
+                "    if n % 2:\n"
+                "        return float(ordered[n // 2])\n"
+                "    return (ordered[n // 2 - 1] + ordered[n // 2]) / 2\n\n"
+                "def stdev(nums):\n"
+                "    m = mean(list(nums))\n"
+                "    return (sum((x - m) ** 2 for x in nums) / len(nums)) ** 0.5\n",
+                encoding="utf-8",
+            )
     return run_dir
 
 
@@ -584,3 +599,189 @@ def test_s4_checks_bite(tmp_path: Path, mutate) -> None:
     write_task(workspace, **mutate(task))
     result = run_checks("s4_compaction_tester", workspace)
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+# -- S6: queue priority + the development/testing gate ----------------------------
+
+
+def s6_msg(kind: str, ts: str, content: str, usage: dict | None = None) -> dict:
+    msg = {
+        "kind": kind,
+        "timestamp": ts,
+        "parts": (
+            [{"part_kind": "user-prompt", "content": content}]
+            if kind == "request"
+            else [{"part_kind": "text", "content": content}]
+        ),
+    }
+    if usage is not None:
+        msg["usage"] = usage
+    return msg
+
+
+def s6_tasks() -> list[dict]:
+    """The intended S6 flow: bug brief activated first (queue head), dev →
+    testing; the feature brief activated only after the bug's testing
+    finished (the gate) — then its own dev → testing."""
+    scenario = load_scenario_toml("s6_queue_priority")
+    feature_title = scenario["briefs"][0]["title"]
+    bug_title = scenario["briefs"][1]["title"]
+    feature_text = scenario["briefs"][0]["text"].strip()
+    bug_text = scenario["briefs"][1]["text"].strip()
+    coder_usage = {"input_tokens": 500, "output_tokens": 50}
+    tester_usage = {"input_tokens": 800, "output_tokens": 30}
+    return [
+        {
+            "id": "t-bug",
+            "title": bug_title,
+            "kind": "bug",
+            "status": "completed",
+            "verification": "Verified successfully",
+            "created_at": "2025-06-01T10:00:00+00:00",
+            "activated_at": "2025-06-01T10:00:05+00:00",
+            "messages": [
+                s6_msg("request", "2025-06-01T10:00:10+00:00", bug_text),
+                s6_msg("response", "2025-06-01T10:00:40+00:00", "median() исправлен.", usage=coder_usage),
+            ],
+            "tester_messages": [
+                [
+                    s6_msg("request", "2025-06-01T10:00:45+00:00", "Verify: median()"),
+                    s6_msg("response", "2025-06-01T10:01:10+00:00", "passed", usage=tester_usage),
+                ]
+            ],
+            "events": [],
+        },
+        {
+            "id": "t-feature",
+            "title": feature_title,
+            "kind": "feature",
+            "status": "completed",
+            "verification": "Verified successfully",
+            "created_at": "2025-06-01T10:00:00+00:00",
+            "activated_at": "2025-06-01T10:01:20+00:00",
+            "messages": [
+                s6_msg("request", "2025-06-01T10:01:30+00:00", feature_text),
+                s6_msg("response", "2025-06-01T10:02:00+00:00", "stdev() реализован.", usage=coder_usage),
+            ],
+            "tester_messages": [
+                [
+                    s6_msg("request", "2025-06-01T10:02:05+00:00", "Verify: stdev()"),
+                    s6_msg("response", "2025-06-01T10:02:30+00:00", "passed", usage=tester_usage),
+                ]
+            ],
+            "events": [],
+        },
+    ]
+
+
+def test_s6_checks_green(tmp_path: Path) -> None:
+    run_dir = make_workspace(tmp_path, "s6_queue_priority", fix=True)
+    workspace = run_dir / "workspace"
+    for task in s6_tasks():
+        write_task(workspace, **task)
+    result = run_checks("s6_queue_priority", workspace)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "bug activated before feature" in result.stdout
+    assert "never overlap" in result.stdout
+
+
+def test_s6_checks_green_with_recorder_log(tmp_path: Path) -> None:
+    """The recorder-based gate check (§5/§7): distinct role tags, all
+    requests matched to transcript responses, no overlapping request
+    intervals → green."""
+    run_dir = make_workspace(tmp_path, "s6_queue_priority", fix=True)
+    workspace = run_dir / "workspace"
+    for task in s6_tasks():
+        write_task(workspace, **task)
+    log = [
+        {"role": "coder-m@a", "ts": 1750000000.0 + 10, "latency_ms": 5000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        {"role": "coder-m@a", "ts": 1750000000.0 + 90, "latency_ms": 5000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        {"role": "tester-m@b", "ts": 1750000000.0 + 70, "latency_ms": 5000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        {"role": "tester-m@b", "ts": 1750000000.0 + 150, "latency_ms": 5000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        # Unmatched entry — the compaction agent's (§1.5): never counts.
+        {"role": "tester-m@b", "ts": 1750000000.0 + 20, "latency_ms": 5000,
+         "usage": {"input_tokens": 42, "output_tokens": 7}},
+    ]
+    (run_dir / "model_log.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in log) + "\n", encoding="utf-8"
+    )
+    result = run_checks("s6_queue_priority", workspace)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_s6_checks_bite_on_recorder_overlap(tmp_path: Path) -> None:
+    """A coder request in flight while a tester request is in flight —
+    caught by the recorder log even when the transcripts look clean."""
+    run_dir = make_workspace(tmp_path, "s6_queue_priority", fix=True)
+    workspace = run_dir / "workspace"
+    for task in s6_tasks():
+        write_task(workspace, **task)
+    log = [
+        {"role": "coder-m@a", "ts": 1750000000.0 + 10, "latency_ms": 60000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        {"role": "tester-m@b", "ts": 1750000000.0 + 40, "latency_ms": 60000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        {"role": "coder-m@a", "ts": 1750000000.0 + 90, "latency_ms": 5000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        {"role": "tester-m@b", "ts": 1750000000.0 + 150, "latency_ms": 5000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+    ]
+    (run_dir / "model_log.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in log) + "\n", encoding="utf-8"
+    )
+    result = run_checks("s6_queue_priority", workspace)
+    assert result.returncode == 1
+    assert "GATE VIOLATION (recorder)" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda tasks: [
+                {**tasks[0], "activated_at": "2025-06-01T10:01:25+00:00"},
+                tasks[1],
+            ],
+            id="bug-activated-after-feature",
+        ),
+        pytest.param(
+            lambda tasks: [
+                tasks[0],
+                {
+                    **tasks[1],
+                    "messages": tasks[1]["messages"]
+                    + [s6_msg("response", "2025-06-01T10:00:55+00:00", "влез в чужой testing")],
+                },
+            ],
+            id="coder-message-inside-tester-round",
+        ),
+        pytest.param(
+            lambda tasks: [{**tasks[0], "verification": None}, tasks[1]],
+            id="bug-not-verified",
+        ),
+        pytest.param(
+            lambda tasks: [{**tasks[0], "status": "testing"}, tasks[1]],
+            id="bug-still-testing",
+        ),
+    ],
+)
+def test_s6_checks_bite(tmp_path: Path, mutate) -> None:
+    run_dir = make_workspace(tmp_path, "s6_queue_priority", fix=True)
+    workspace = run_dir / "workspace"
+    for task in mutate(s6_tasks()):
+        write_task(workspace, **task)
+    result = run_checks("s6_queue_priority", workspace)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_s6_checks_bite_on_red_pytest(tmp_path: Path) -> None:
+    run_dir = make_workspace(tmp_path, "s6_queue_priority", fix=False)
+    workspace = run_dir / "workspace"
+    for task in s6_tasks():
+        write_task(workspace, **task)
+    result = run_checks("s6_queue_priority", workspace)
+    assert result.returncode == 1

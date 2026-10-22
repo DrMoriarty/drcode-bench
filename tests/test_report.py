@@ -226,3 +226,50 @@ def test_report_marks_tester_threshold_source(tmp_path: Path) -> None:
     report = out.read_text(encoding="utf-8")
     assert "Tester compaction threshold source: coding" in report
     assert "REGRESSION" in report
+
+
+def test_summary_cells_link_to_representative_run(tmp_path: Path) -> None:
+    """DoD of stage 5: every summary cell clickably links to the
+    artifacts of the pair's runs/<run_id>/ (the median-wall repeat)."""
+    for i, wall in enumerate((100.0, 200.0, 300.0), start=1):
+        _write_run(
+            tmp_path / "runs",
+            make_metrics(f"r{i}", "s1", "c1", wall_time_s={"settle": wall, "run": wall}),
+        )
+    out = generate_report(tmp_path / "runs")
+    text = out.read_text(encoding="utf-8")
+    # The median repeat (200 s) is the link target of the wall-time cell
+    # (with the min…max spread in the same cell).
+    assert "[200 s · 100…300](runs/r2/)" in text
+    # The scenario and verdict cells link to the same representative run.
+    assert "[s1](runs/r2/)" in text
+    assert "[green](runs/r2/)" in text
+    # No square brackets inside link texts (nested links break markdown).
+    import re as _re
+
+    for m in _re.finditer(r"\[([^\]]*)\]\(([^)]+)\)", text):
+        assert "[" not in m.group(1)
+
+
+def test_summary_shows_gate_verdict(tmp_path: Path) -> None:
+    """§7 S6: the run table carries the gate verdict; an overlap is
+    flagged in the run details."""
+    m = make_metrics("r-gate", "s6_queue_priority", "c1")
+    m["gate"] = {"verdict": "OVERLAP", "overlaps": [{"detail": "x"}]}
+    _write_run(tmp_path, m)
+    out = generate_report(tmp_path)
+    text = out.read_text(encoding="utf-8")
+    assert "gate" in text
+    assert "OVERLAP" in text
+    assert "GATE VIOLATION" in text
+
+
+def test_generate_report_html(tmp_path: Path) -> None:
+    """Optional HTML rendering (§10): same content, table tags, links kept."""
+    _write_run(tmp_path / "runs", make_metrics("r1", "s1_happy", "combo-a"))
+    out = generate_report(tmp_path / "runs", html=True)
+    html_path = out.with_suffix(".html")
+    assert html_path.is_file()
+    text = html_path.read_text(encoding="utf-8")
+    assert "<table>" in text and "</html>" in text
+    assert '<a href="runs/r1/">' in text

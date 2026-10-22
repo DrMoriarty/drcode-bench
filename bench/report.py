@@ -1,11 +1,13 @@
 """Report aggregation: runs/ → report.md (plan drcode-bench.md, §10).
 
-    python -m bench report runs/        # → runs/report.md
+    python -m bench report runs/           # → runs/report.md
+    python -m bench report runs/ --html    # + report.html
 
-One section per (scenario, combo) pair; today a pair has a single run
-(no matrix/repeats yet — §12 stage 5), but the aggregation is already
-built around medians/min/max over repeats: a pair with one run shows the
-same table shape with spread columns that collapse to the single value.
+The summary table is combo × scenario (§10): rows — median wall-time,
+median/sum tokens per role, verdict, number of compactions — with the
+spread over the repeats (min…max) and every cell linking to the
+artifacts of the pair's representative run (`runs/<run_id>/`, the
+median-wall repeat) so each cell is clickably dissectible.
 
 The per-run table links the artifacts of every run (metrics.json,
 result.json, the run dir) so each run stays reproducibly dissectible.
@@ -135,7 +137,8 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     compactions, testing rounds and the recorder's model traffic
     (requests, latency p50/p95, tokens per role — §10); verdicts list all
     outcomes seen across the repeats (a pair is only as good as its worst
-    repeat)."""
+    repeat). `repr_run` is the median-wall repeat — the run whose
+    artifacts the summary table's cells link to."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for m in runs:
         key = (m.get("scenario") or "?", m.get("combo") or "?")
@@ -166,6 +169,7 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "scenario": scenario,
                 "combo": combo,
                 "runs": [m.get("run_id") for m in group],
+                "repr_run": _representative_run(group, wall),
                 "verdicts": sorted({m.get("verdict") or "unknown" for m in group}),
                 "wall_time_s": wall,
                 "compactions": compactions,
@@ -177,6 +181,12 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "latency_ms_p50": latency_p50,
                 "latency_ms_p95": latency_p95,
                 "tokens_by_role": _tokens_by_role(group),
+                "gate": sorted(
+                    {
+                        ((m.get("gate") or {}).get("verdict") or "n/a")
+                        for m in group
+                    }
+                ),
                 "stability": sorted(
                     {_stability_flags(m) for m in group} - {"clean"}
                 )
@@ -186,20 +196,51 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return pairs
 
 
+def _representative_run(
+    group: list[dict[str, Any]], wall: dict[str, Any]
+) -> str | None:
+    """The run whose artifacts the summary cells link to: the median-wall
+    repeat (the first run when the median is not a member / single run)."""
+    median = wall.get("median")
+    for m in group:
+        if (
+            median is not None
+            and m.get("wall_time_s", {}).get("settle") == median
+        ):
+            return m.get("run_id")
+    return group[0].get("run_id") if group else None
+
+
+def _cell(text: str, run_id: str | None) -> str:
+    """A summary-table cell: every cell links to the artifacts of the
+    pair's representative run (§10/DoD: runs/<run_id>/ is one click away
+    from the aggregate figure)."""
+    if not run_id or text == "—":
+        return text
+    return f"[{text}](runs/{run_id}/)"
+
+
+def _with_spread(agg: dict[str, Any], suffix: str = "") -> str:
+    """`median` plus the min…max spread over the repeats (§10); no square
+    brackets inside (the cell text is wrapped in a markdown link)."""
+    text = _fmt(agg["median"], suffix)
+    if agg["n"] > 1 and agg["min"] != agg["max"]:
+        text += f" · {_fmt(agg['min'])}…{_fmt(agg['max'])}"
+    return text
+
+
 def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     lines = [
         "| scenario | combo | runs | verdicts | wall-time (median, s) | "
         "compactions (med) | testing rounds (med) | bug round-trips (med) | "
         "sim interventions (med) | output tokens (med) | "
         "model requests (med) | latency p50/p95 (med, s) | "
-        "tokens by role (med, prompt/compl.) | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "tokens by role (med, prompt/compl.) | gate | stability |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
-        wall = p["wall_time_s"]
-        wall_str = _fmt(wall["median"], " s")
-        if wall["n"] > 1 and wall["min"] != wall["max"]:
-            wall_str += f" [{_fmt(wall['min'])}…{_fmt(wall['max'])}]"
+        repr_run = p.get("repr_run")
+        link = lambda text: _cell(text, repr_run)  # noqa: E731
         lat_p50 = p["latency_ms_p50"]
         lat_str = (
             f"{_fmt(lat_p50['median'] / 1000 if lat_p50['median'] is not None else None)} / "
@@ -210,18 +251,19 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             for role, v in p["tokens_by_role"].items()
         )
         lines.append(
-            f"| {p['scenario']} | {p['combo']} | {wall['n']} "
-            f"| {', '.join(p['verdicts'])} "
-            f"| {wall_str} "
-            f"| {_fmt(p['compactions']['median'])} "
-            f"| {_fmt(p['testing_rounds']['median'])} "
-            f"| {_fmt(p['bug_round_trips']['median'])} "
-            f"| {_fmt(p['sim_interventions']['median'])} "
-            f"| {_fmt(p['output_tokens']['median'])} "
-            f"| {_fmt(p['model_requests']['median'])} "
-            f"| {lat_str} "
-            f"| {tokens_by_role or '—'} "
-            f"| {', '.join(p['stability'])} |"
+            f"| {link(p['scenario'])} | {link(p['combo'])} | {p['wall_time_s']['n']} "
+            f"| {link(', '.join(p['verdicts']))} "
+            f"| {link(_with_spread(p['wall_time_s'], ' s'))} "
+            f"| {link(_with_spread(p['compactions']))} "
+            f"| {link(_fmt(p['testing_rounds']['median']))} "
+            f"| {link(_fmt(p['bug_round_trips']['median']))} "
+            f"| {link(_fmt(p['sim_interventions']['median']))} "
+            f"| {link(_with_spread(p['output_tokens']))} "
+            f"| {link(_fmt(p['model_requests']['median']))} "
+            f"| {link(lat_str)} "
+            f"| {link(tokens_by_role or '—')} "
+            f"| {link(', '.join(p['gate']))} "
+            f"| {link(', '.join(p['stability']))} |"
         )
     return lines
 
@@ -229,8 +271,8 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
 def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
     lines = [
         "| run | scenario | combo | verdict | wall-time | checks | compactions "
-        "(ok/started/failed) | testing rounds | sim interventions | tasks | stability | artifacts |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "(ok/started/failed) | testing rounds | sim interventions | tasks | gate | stability | artifacts |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in runs:
         run_id = m.get("run_id") or "?"
@@ -252,11 +294,15 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
         verdicts = "/".join(
             f"{t.get('kind')}:{t.get('verification') or t.get('status')}" for t in tasks
         ) or "—"
+        gate = (m.get("gate") or {}).get("verdict") or "n/a"
+        if gate == "OVERLAP":
+            gate += " ⚠"
         lines.append(
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
             f"| {_fmt(m.get('verdict'))} | {_fmt(m.get('wall_time_s', {}).get('settle'), ' s')} "
             f"| {checks_str} | {comp_str} "
             f"| {_fmt(comp.get('n_testing_rounds'))} | {sim_str} | {verdicts} "
+            f"| {gate} "
             f"| {_stability_flags(m)} "
             f"| [metrics]({rel}/metrics.json) · [result]({rel}/result.json) |"
         )
@@ -305,6 +351,19 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
                 "⚠ Repeat compaction (§10): a context was compacted more "
                 "than once — degradation after the summary.\n"
             )
+        # The development/testing gate (§7 S6): coder and tester must never
+        # be in flight at the same time — verified from the transcripts
+        # and, when the recorder separates the roles, from model_log.jsonl.
+        gate = m.get("gate")
+        if gate and gate.get("verdict") == "OVERLAP":
+            lines.append(
+                "⚠ GATE VIOLATION: coder and tester activity overlapped — "
+                "the pipeline gate 'no development while testing is in "
+                "flight' did not hold.\n"
+            )
+            for o in gate.get("overlaps") or []:
+                lines.append(f"- {o}")
+            lines.append("")
         ttc = m.get("tester_threshold_from_coding")
         if ttc is not None:
             flag = (
@@ -393,9 +452,11 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
     return lines
 
 
-def generate_report(runs_dir: Path, out: Path | None = None) -> Path:
-    """Scan `runs_dir`, extract missing metrics, write the markdown report.
-    Returns the path of the written report (default: `<runs_dir>/report.md`)."""
+def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = False) -> Path:
+    """Scan `runs_dir`, extract missing metrics, write the markdown report
+    (and, with `html=True`, an HTML rendering next to it).
+    Returns the path of the written markdown report
+    (default: `<runs_dir>/report.md`)."""
     runs_dir = Path(runs_dir)
     out = out or (runs_dir / "report.md")
 
@@ -411,7 +472,8 @@ def generate_report(runs_dir: Path, out: Path | None = None) -> Path:
         "",
         "## Summary (scenario × combo)",
         "",
-        "Medians over the repeats of each pair; a single run is a repeat count of 1.",
+        "Medians over the repeats of each pair; a single run is a repeat count of 1. "
+        "Every cell links to the artifacts of the pair's median-wall run.",
         "",
         *_pair_rows(pairs),
         "",
@@ -426,7 +488,97 @@ def generate_report(runs_dir: Path, out: Path | None = None) -> Path:
     report = "\n".join(lines).rstrip() + "\n"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
+    if html:
+        html_path = out.with_suffix(".html")
+        html_path.write_text(_md_to_html(report), encoding="utf-8")
     return out
+
+
+# --- minimal markdown → HTML rendering (no extra dependencies) -----------------
+
+
+def _md_inline(text: str) -> str:
+    """Inline markdown: escape, `code`, **bold**, [text](url)."""
+    import html as _html
+    import re as _re
+
+    text = _html.escape(text, quote=False)
+    text = _re.sub(
+        r"\[([^\]]+)\]\(([^)\s]+)\)",
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+        text,
+    )
+    text = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = _re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    return text
+
+
+def _md_to_html(md: str) -> str:
+    """A small renderer for the report's own markdown subset: headings,
+    paragraphs, `- ` lists and pipe tables. Enough for report.html without
+    pulling in a markdown dependency."""
+    out: list[str] = [
+        "<!DOCTYPE html>",
+        '<html lang="en"><head><meta charset="utf-8">',
+        "<title>drcode-bench report</title>",
+        "<style>",
+        "body{font-family:system-ui,sans-serif;margin:2rem;max-width:160rem;}",
+        "table{border-collapse:collapse;margin:1rem 0;}",
+        "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;"
+        "vertical-align:top;}",
+        "th{background:#f4f4f4;}",
+        "code{background:#f4f4f4;padding:0 4px;}",
+        "h1,h2,h3{margin-top:1.6rem;}",
+        "</style></head><body>",
+    ]
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        if line.startswith("### "):
+            out.append(f"<h3>{_md_inline(line[4:])}</h3>")
+            i += 1
+        elif line.startswith("## "):
+            out.append(f"<h2>{_md_inline(line[3:])}</h2>")
+            i += 1
+        elif line.startswith("# "):
+            out.append(f"<h1>{_md_inline(line[2:])}</h1>")
+            i += 1
+        elif line.lstrip().startswith("|"):
+            rows: list[list[str]] = []
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(set(c) <= set("-: ") and c for c in cells):
+                    rows.append(cells)
+                i += 1
+            out.append("<table>")
+            for r, row in enumerate(rows):
+                tag = "th" if r == 0 else "td"
+                out.append(
+                    "<tr>"
+                    + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row)
+                    + "</tr>"
+                )
+            out.append("</table>")
+        elif line.lstrip().startswith("- "):
+            out.append("<ul>")
+            while i < len(lines) and lines[i].lstrip().startswith("- "):
+                out.append(f"<li>{_md_inline(lines[i].lstrip()[2:])}</li>")
+                i += 1
+            out.append("</ul>")
+        else:
+            paragraph: list[str] = []
+            while i < len(lines) and lines[i].strip() and not lines[i].lstrip().startswith(
+                ("|", "- ", "# ")
+            ):
+                paragraph.append(_md_inline(lines[i]))
+                i += 1
+            out.append("<p>" + "<br>".join(paragraph) + "</p>")
+    out.append("</body></html>")
+    return "\n".join(out)
 
 
 def main(argv: list[str] | None = None) -> int:

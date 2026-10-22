@@ -30,6 +30,19 @@ max_tokens = 4096
 
 # Комбинации: роль → "provider/model-id". Ровно эти три роли поддерживает
 # drcode.providers.AgentRole: coding / tester / compaction.
+#
+# Обязательные «угловые» комбинации матрицы (план §8):
+#   - baseline-single-model      — все роли на одной модели (базлайн);
+#   - strong-coder/cheap-tester  — тестер слабее кодера (поймает ли он
+#                                  баг вообще); у неё кодер и тестер на
+#                                  РАЗНЫХ провайдерах — recorder-лог
+#                                  (model_log.jsonl) разделяет роли по
+#                                  тегу model@base_url, что нужно
+#                                  recorder-проверке гейта в S6;
+#   - degradation-weak-compactor — слабый компактизатор: деградация
+#                                  summary; failure компакции не роняет
+#                                  ран (защищено в drcode, бенчмарк
+#                                  подтверждает — см. отчёт §10).
 
 [[combo]]
 name       = "strong-coder/cheap-tester"
@@ -78,9 +91,7 @@ coding_max_context_tokens = 3000
 # самая маленькая модель матрицы; summary ожидаемо хуже, возможны
 # «compaction failed» / повторные компакции. drcode обязан переживать это
 # без падения прогона (gate отключается, ран идёт несжатым) — бенчмарк
-# распознаёт состояние и отмечает его в отчёте (§1.2, §10). Полный
-# матричный раннер — следующий этап (§12 этап 5); пока combo для ручной
-# проверки: python -m bench.run_one <scenario> degradation-weak-compactor <run_dir>
+# распознаёт состояние и отмечает его в отчёте (§1.2, §10).
 name       = "degradation-weak-compactor"
 coding     = "provider-a/qwen3-coder-30b"
 tester     = "provider-a/qwen3-coder-30b"

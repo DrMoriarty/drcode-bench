@@ -7,6 +7,7 @@ storage.py/models.py and the transcript serialization of pydantic-ai).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -444,6 +445,7 @@ def test_extract_run_metrics_model_log(tmp_path: Path) -> None:
 # -- tester compaction threshold source (§1.2/§13, stage 4 / S4) -----------------
 
 from bench.metrics import (  # noqa: E402
+    analyze_gate,
     analyze_tester_threshold,
     read_context_limits,
     user_prompt_content,
@@ -744,3 +746,148 @@ def test_extract_run_metrics_carries_threshold_verdict(tmp_path: Path) -> None:
     metrics = extract_run_metrics(tmp_path, write=False)
     assert metrics["tester_threshold_from_coding"] is False
     assert metrics["totals"]["n_summaries"] >= 1
+
+
+# -- the development/testing gate (§7 S6, stage 5) --------------------------------
+
+
+def _gate_task(kind: str, title: str, coder_stamps: list[str], tester_rounds: list[tuple[str, str]]) -> dict:
+    return {
+        "id": title,
+        "title": title,
+        "kind": kind,
+        "messages": [
+            {
+                "kind": "response",
+                "timestamp": ts,
+                "parts": [{"part_kind": "text", "content": "x"}],
+                "usage": {"input_tokens": 500, "output_tokens": 50},
+            }
+            for ts in coder_stamps
+        ],
+        "tester_messages": [
+            [
+                {"kind": "request", "timestamp": a, "parts": []},
+                {
+                    "kind": "response",
+                    "timestamp": b,
+                    "parts": [],
+                    "usage": {"input_tokens": 800, "output_tokens": 30},
+                },
+            ]
+            for a, b in tester_rounds
+        ],
+        "events": [],
+    }
+
+
+def test_analyze_gate_ok_sequential() -> None:
+    """Bug dev → bug testing → feature dev → feature testing: never both
+    in flight (§7 S6)."""
+    tasks = [
+        _gate_task(
+            "bug", "bug", ["2025-06-01T10:00:10+00:00", "2025-06-01T10:00:40+00:00"],
+            [("2025-06-01T10:00:45+00:00", "2025-06-01T10:01:10+00:00")],
+        ),
+        _gate_task(
+            "feature", "feature", ["2025-06-01T10:01:30+00:00", "2025-06-01T10:02:00+00:00"],
+            [("2025-06-01T10:02:05+00:00", "2025-06-01T10:02:30+00:00")],
+        ),
+    ]
+    gate = analyze_gate(tasks)
+    assert gate["verdict"] == "ok"
+    assert gate["overlaps"] == []
+
+
+def test_analyze_gate_bites_on_coder_inside_tester_round() -> None:
+    """A coder message stamped inside a tester round = both agents in
+    flight — the gate violation S6 exists to catch."""
+    tasks = [
+        _gate_task(
+            "bug", "bug", ["2025-06-01T10:00:10+00:00", "2025-06-01T10:00:40+00:00"],
+            [("2025-06-01T10:00:45+00:00", "2025-06-01T10:01:10+00:00")],
+        ),
+        _gate_task(
+            "feature", "feature", ["2025-06-01T10:00:55+00:00"], [],
+        ),
+    ]
+    gate = analyze_gate(tasks)
+    assert gate["verdict"] == "OVERLAP"
+    (o,) = gate["overlaps"]
+    assert o["source"] == "transcripts"
+    assert "feature" in o["coder"] and "bug" in o["tester"]
+
+
+def test_analyze_gate_no_testing() -> None:
+    gate = analyze_gate([_gate_task("feature", "f", ["2025-06-01T10:00:10+00:00"], [])])
+    assert gate["verdict"] == "no-testing"
+
+
+def test_analyze_gate_recorder_overlap_detected() -> None:
+    """Recorder-based gate check: coder-tag and tester-tag request
+    intervals overlap; the compaction entry (unmatched, §1.5) must not
+    affect the verdict."""
+    base = 1750000000.0  # 2025-06-15T15:06:40Z
+    t0 = datetime.fromtimestamp(base, tz=timezone.utc).isoformat()
+    t1 = datetime.fromtimestamp(base + 55, tz=timezone.utc).isoformat()
+    t2 = datetime.fromtimestamp(base + 65, tz=timezone.utc).isoformat()
+    tasks = [
+        _gate_task("bug", "bug", [t0], [(t1, t2)]),
+    ]
+    log = [
+        # the task's real coder response (matches the transcript)
+        {"role": "c@a", "ts": base + 5, "latency_ms": 4000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        # an in-flight coder request OVERLAPPING an in-flight tester request
+        {"role": "c@a", "ts": base + 30, "latency_ms": 60000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        # the tester's round response (matches the transcript)
+        {"role": "t@b", "ts": base + 60, "latency_ms": 4000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        # an in-flight tester request overlapping the coder request above
+        {"role": "t@b", "ts": base + 20, "latency_ms": 60000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        # compaction traffic: unmatched — must be ignored
+        {"role": "t@b", "ts": base + 20, "latency_ms": 4000,
+         "usage": {"input_tokens": 111, "output_tokens": 22}},
+    ]
+    gate = analyze_gate(tasks, log)
+    assert gate["verdict"] == "OVERLAP"
+    assert any(o["source"] == "recorder" for o in gate["overlaps"])
+
+
+def test_analyze_gate_recorder_ok_when_sequential() -> None:
+    base = 1750000000.0
+    t0 = datetime.fromtimestamp(base, tz=timezone.utc).isoformat()
+    t1 = datetime.fromtimestamp(base + 55, tz=timezone.utc).isoformat()
+    t2 = datetime.fromtimestamp(base + 65, tz=timezone.utc).isoformat()
+    tasks = [_gate_task("bug", "bug", [t0], [(t1, t2)])]
+    log = [
+        {"role": "c@a", "ts": base + 5, "latency_ms": 4000,
+         "usage": {"input_tokens": 500, "output_tokens": 50}},
+        {"role": "t@b", "ts": base + 60, "latency_ms": 4000,
+         "usage": {"input_tokens": 800, "output_tokens": 30}},
+    ]
+    gate = analyze_gate(tasks, log)
+    assert gate["verdict"] == "ok"
+    assert gate["sources"] == ["transcripts", "recorder"]
+
+
+def test_extract_run_metrics_carries_gate(tmp_path: Path) -> None:
+    tasks_dir = tmp_path / "workspace" / ".drcode" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tmp_path / "result.json").write_text(
+        json.dumps({"scenario": "s6", "combo": "c", "ok": True}), encoding="utf-8"
+    )
+    (tasks_dir / "t1.json").write_text(
+        json.dumps(
+            _gate_task(
+                "bug", "bug", ["2025-06-01T10:00:10+00:00"],
+                [("2025-06-01T10:01:00+00:00", "2025-06-01T10:02:00+00:00")],
+            )
+        ),
+        encoding="utf-8",
+    )
+    metrics = extract_run_metrics(tmp_path, write=False)
+    assert metrics["gate"]["verdict"] == "ok"
+    assert metrics["gate"]["n_tester_rounds"] == 1
