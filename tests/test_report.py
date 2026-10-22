@@ -214,17 +214,18 @@ def test_report_marks_compaction_failed_state(tmp_path: Path) -> None:
 
 
 def test_report_marks_tester_threshold_source(tmp_path: Path) -> None:
-    """§1.2/§13 (S4): the tester-threshold-source remark is rendered — and
-    a 'tester' classification is named a REGRESSION."""
+    """§1.2 (S4): the tester-threshold-source remark is rendered — and
+    a 'coding' classification (the pre-0.5.0 behavior) is named a
+    REGRESSION."""
     ok = make_metrics("r-ttc-ok", "s4_compaction_tester", "combo-a")
-    ok["tester_threshold_from_coding"] = True
+    ok["tester_threshold_from_tester"] = True
     _write_run(tmp_path, ok)
     reg = make_metrics("r-ttc-reg", "s4_compaction_tester", "combo-a")
-    reg["tester_threshold_from_coding"] = False
+    reg["tester_threshold_from_tester"] = False
     _write_run(tmp_path, reg)
     out = generate_report(tmp_path)
     report = out.read_text(encoding="utf-8")
-    assert "Tester compaction threshold source: coding" in report
+    assert "Tester compaction threshold source: tester" in report
     assert "REGRESSION" in report
 
 

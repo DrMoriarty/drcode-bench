@@ -6,9 +6,10 @@ Usage: python checks.py <workspace>          (exit 0 = green)
 The verdict is NEVER built on the agents' words:
   1. pytest is run in the workspace by the harness itself;
   2. the persisted task JSON must show the mid-round compaction of the
-     tester really happened (§1.2: the tester's threshold is computed
-     from the CODING model's small context — the source itself is
-     classified in metrics.json, `tester_threshold_from_coding`):
+     tester really happened (§1.2, drcode ≥ 0.5.0: the tester's threshold
+     is computed from the TESTER model's own config — the source itself is
+     classified in metrics.json, `tester_threshold_from_tester`; a
+     'coding' source would be a regression to the pre-0.5.0 behavior):
        - a tester-phase compaction start event in `events`
          ("compacting the testing round" / "pausing the tester round…");
        - the success event ("testing round summarized");

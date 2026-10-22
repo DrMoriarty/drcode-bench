@@ -351,15 +351,15 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
             for o in gate.get("overlaps") or []:
                 lines.append(f"- {o}")
             lines.append("")
-        ttc = m.get("tester_threshold_from_coding")
-        if ttc is not None:
+        ttt = m.get("tester_threshold_from_tester")
+        if ttt is not None:
             flag = (
-                "as expected (§1.2/§13)"
-                if ttc
-                else "REGRESSION — threshold came from the tester model"
+                "as expected (drcode ≥ 0.5.0: per-role config, §1.2)"
+                if ttt
+                else "REGRESSION — threshold came from the coding model"
             )
             lines.append(
-                f"Tester compaction threshold source: {'coding' if ttc else 'NOT coding'} "
+                f"Tester compaction threshold source: {'tester' if ttt else 'NOT tester'} "
                 f"model config — {flag}."
             )
             lines.append("")

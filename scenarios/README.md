@@ -88,11 +88,14 @@ S7 fault injection (опция).
 
 ## Компакционные сценарии S3/S4 (этап 4, план §1.2/§12)
 
-- «Маленький контекст» ставится **кодинговой** модели: либо отдельным id
-  модели в каталоге (`qwen3-8b-small-ctx`), либо переопределением на роль
-  из combo — `coding_max_context_tokens = 3000` в matrix.toml (попадает в
-  entry каталога models.json, который перекрывает flat config для роли;
-  env `DRCODE_MAX_CONTEXT_TOKENS` не используется и в прогоне вычищается).
+- «Маленький контекст» ставится **целевой роли** (план §1.2, drcode ≥ 0.5.0 —
+  пер-ролевое разрешение моделей): S3 — кодинговой модели (её mid-run/
+  turn-boundary гейты), S4 — модели тестера (её mid-round гейт). Варианты:
+  отдельный id модели в каталоге (`qwen3-8b-small-ctx`) либо переопределение
+  на роль из combo — `<роль>_max_context_tokens = 3000` в matrix.toml
+  (попадает в entry каталога models.json, который перекрывает flat config
+  для роли; env `DRCODE_MAX_CONTEXT_TOKENS` не используется — flat-config
+  fallback в 0.5.0 удалён — и в прогоне всё равно вычищается).
 - S3: сид — каталог `glossary/` из 18 модулей, brief велит прочитать
   каждый; assertions checks.py: событие «Context compacted», compaction
   start (mid-run pause или turn boundary), `COMPACTION_SUMMARY_PREFIX`
@@ -102,9 +105,11 @@ S7 fault injection (опция).
   полный листинг» (run_bash с жирным stdout); assertions checks.py:
   compaction-евент внутри testing-раунда, `tester_messages[-1]` содержит
   summary, вердикт выставлен.
-- Источник порога тестера (§1.2/§13: конфиг КОДИНГОВОЙ модели) — объект
-  проверки: `metrics.json` классифицирует его
-  (`tester_threshold_from_coding`), отчёт помечает регрессию.
+- Источник порога тестера (§1.2, drcode ≥ 0.5.0: конфиг МОДЕЛИ ТЕСТЕРА) —
+  объект проверки: `metrics.json` классифицирует его
+  (`tester_threshold_from_tester`), отчёт помечает регрессией порог от
+  кодинговой модели (допер-ролевое поведение; оговорка про resume-путь
+  drcode — в drcode-bench.md §13).
 - `metrics.json` также содержит: `repeat_compaction` (повторная компакция
   — деградация после summary) и `compaction_failed`-евенты (в drcode
   failure компакции never fatal: gate отключается, ран продолжается

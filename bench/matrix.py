@@ -61,12 +61,15 @@ class Combo:
     """One matrix combination: role → provider/model reference.
 
     `max_context_overrides` carries the per-role `max_context_tokens`
-    overrides of the combo (plan §1.2/§8): compaction scenarios S3/S4 need
-    a SMALL context on the CODING model, and the override must be written
+    overrides of the combo (plan §1.2/§8): compaction scenarios need a SMALL
+    context on the compacted role (S3 → the coding model's mid-run gate,
+    S4 → the tester model's mid-round gate — since drcode 0.5.0 both gates
+    read the role's own resolved config), and the override must be written
     into the catalog entry (models.json) — the layer `providers.resolve`
     reads a role's connection and context from — so that the run does not
     have to depend on `DRCODE_MAX_CONTEXT_TOKENS` env (which subprocess
-    hygiene strips anyway, §13). TOML form, flat per role:
+    hygiene strips anyway, §13; the flat-config fallback itself is gone in
+    0.5.0). TOML form, flat per role:
 
         [[combo]]
         name   = "..."
@@ -122,7 +125,8 @@ def parse_ref(ref: str, context: str) -> tuple[str, str]:
 def _parse_max_context_overrides(raw: dict, *, combo_name: str) -> tuple[tuple[str, int], ...]:
     """Per-role `max_context_tokens` overrides of a combo entry: flat TOML
     keys `<role>_max_context_tokens` (§1.2: the small context goes to the
-    CODING model — even in the tester-compaction scenario S4, §13)."""
+    compacted role — S3 → coding, S4 → tester; since drcode 0.5.0 each
+    compaction gate reads its own role's resolved config)."""
     out: list[tuple[str, int]] = []
     for role in ROLES:
         value = raw.get(f"{role}_max_context_tokens")

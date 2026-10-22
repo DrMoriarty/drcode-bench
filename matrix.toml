@@ -57,10 +57,11 @@ tester     = "provider-a/qwen3-coder-30b"
 compaction = "provider-a/qwen3-coder-30b"
 
 [[combo]]
-# Маленький контекст у кодинговой модели — порог компакции тестера в drcode
-# считается именно от кодинговой модели (план §1.2, §13), поэтому
-# «маленький контекст» всегда ставится кодеру. Здесь он задан отдельным
-# id модели в каталоге (qwen3-8b-small-ctx).
+# Маленький контекст у кодинговой модели — давление компакции на S3:
+# mid-run/turn-boundary гейты кодера считают порог от конфига кодинговой
+# модели (план §1.2). Здесь он задан отдельным id модели в каталоге
+# (qwen3-8b-small-ctx). (Для S4 малый контекст ставится роли тестера —
+# см. combo "s4-tester-compaction".)
 name       = "compaction-pressure"
 coding     = "provider-b/qwen3-8b-small-ctx"
 tester     = "provider-b/qwen3-8b"
@@ -78,13 +79,14 @@ compaction = "provider-b/qwen3-8b"
 coding_max_context_tokens = 3000
 
 [[combo]]
-# S4: маленький контекст — ТОЖЕ у кодера, даже когда тестируется компакция
-# тестера: порог тестера считается от конфига кодинговой модели (§1.2/§13).
+# S4: маленький контекст — у роли ТЕСТЕРА: с drcode ≥ 0.5.0 модели
+# разрешаются пер-ролево, и mid-round гейт тестера делит на конфиг
+# тестеровой модели (_fill_over_threshold(..., AgentRole.TESTER), §1.2).
 name       = "s4-tester-compaction"
 coding     = "provider-b/qwen3-8b"
 tester     = "provider-b/qwen3-8b"
 compaction = "provider-b/qwen3-8b"
-coding_max_context_tokens = 3000
+tester_max_context_tokens = 3000
 
 [[combo]]
 # Деградационная combo (план §8, «слабый компактизатор»): компактизатор —

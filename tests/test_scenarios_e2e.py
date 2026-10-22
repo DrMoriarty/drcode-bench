@@ -71,8 +71,12 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+# The S4 tester's CATALOG context is big on purpose: the small limit must
+# reach the tester ROLE via the combo's per-role override
+# (tester_max_context_tokens), not via the shared catalog entry — that is
+# the drcode ≥ 0.5.0 per-role placement the scenario verifies (§1.2).
 [providers.fake.models.s4-tester]
-max_context_tokens = 100000
+max_context_tokens = 1000000
 max_tokens = 8192
 
 [providers.fake.models.s7-coder]
@@ -88,7 +92,27 @@ name       = "{combo}"
 coding     = "fake/{coder}"
 tester     = "fake/{tester}"
 compaction = "fake/fake-compaction"
-"""
+{extra}"""
+
+# Per-role max_context_tokens overrides appended to the generated combo —
+# the small limit travels in the catalog entry of the ROLE it must pressure
+# (§1.2, drcode ≥ 0.5.0: each compaction gate reads its own role's config).
+COMBO_EXTRA_TOML = {
+    # S4: the tester's catalog context is 1000000 — the override on the
+    # tester ROLE is what the mid-round gate must divide by. The coding
+    # role gets the SAME limit deliberately: drcode's resume path
+    # (_maybe_compact_tester_round) still divides by the CODING config, so
+    # a fill between two distinct thresholds would pause the round without
+    # ever compacting it (or misclassify near the resume point). Equal
+    # limits = the moot classification ('tester', no regression possible) —
+    # the known upstream inconsistency, tracked separately in the submodule.
+    # 50000 (not smaller): the inflated usage stays OVER the threshold after
+    # the compaction too (the verdict round still carries a tool result), so
+    # a tiny limit would loop pause→compact forever instead of settling.
+    "s4_compaction_tester": (
+        "coding_max_context_tokens = 50000\ntester_max_context_tokens = 50000"
+    ),
+}
 
 COMBOS = {
     "s2a_bug_followup": ("s2a-coder", "s2a-tester"),
@@ -96,7 +120,8 @@ COMBOS = {
     "s5_clarification": ("s5-coder", "s5-tester"),
     # S3/S4: the compaction lives on the CODER side (S3) / the TESTER side
     # (S4); the inflated gateway usage (fake_gateway._usage_for) trips the
-    # real gates of drcode on the 100000-token context.
+    # real gates of drcode (S3 on the 100000-token coding context, S4 on
+    # the 30000-token tester override).
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
     "s7_fault_injection": ("s7-coder", "s7-tester"),
@@ -127,7 +152,13 @@ async def _run_scenario(tmp_path: Path, monkeypatch, scenario_id: str):
         combo = f"{scenario_id}-roles"
         matrix_path = tmp_path / "matrix.toml"
         matrix_path.write_text(
-            MATRIX_TEMPLATE.format(port=port, combo=combo, coder=coder, tester=tester),
+            MATRIX_TEMPLATE.format(
+                port=port,
+                combo=combo,
+                coder=coder,
+                tester=tester,
+                extra=COMBO_EXTRA_TOML.get(scenario_id, ""),
+            ),
             encoding="utf-8",
         )
 
@@ -279,9 +310,11 @@ async def test_s3_compaction_coder_end_to_end(tmp_path: Path, monkeypatch, env_g
 async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
     """S4 (plan §7, stage 4): the tester's mid-round compaction — the
     round is rewritten in place (summary in tester_messages[-1]), the
-    verdict is set, checks.py green. The threshold-source classification
-    (§1.2/§13: coding model's config) is exercised with equal limits —
-    'coding' classification, no regression flag."""
+    verdict is set, checks.py green. The small context reaches the TESTER
+    role via the combo's per-role override (drcode ≥ 0.5.0: the mid-round
+    gate divides by the tester model's resolved max_context_tokens), and
+    the threshold-source classification (§1.2) must name 'tester' — a
+    'coding' source would be a regression."""
     report = await _run_scenario(tmp_path, monkeypatch, "s4_compaction_tester")
     run_dir = Path(report.run_dir)
 
@@ -293,6 +326,13 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     assert brief["verification"] == "Verified successfully"
     assert brief["n_testing_rounds"] == 1
 
+    # §1.2: the small limit landed on the tester ROLE via the combo
+    # override (the catalog entry of s4-tester stays big — the override is
+    # what carried it; coding carries the same limit so the run's
+    # resume path can actually compact — see COMBO_EXTRA_TOML).
+    assert report.resolved_context_tokens["coding"] == 50000
+    assert report.resolved_context_tokens["tester"] == 50000
+
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     (task,) = metrics["tasks"]
     comp = task["compactions"]
@@ -303,13 +343,14 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     assert comp["n_summaries_in_transcript"] >= 1
     rounds = task["testing"]["rounds"]
     assert rounds[-1]["has_summary"] is True
-    # §1.2/§13: the threshold-source block exists and does NOT flag a
-    # regression (limits are equal here — classification is moot but must
-    # not say 'tester').
+    # §1.2: the threshold-source block exists and names the tester model's
+    # config (limits are equal here — classification is moot, but it must
+    # not flag a regression).
     threshold = comp["tester_threshold"]
     assert threshold is not None
-    assert threshold["source"] in ("coding", "unknown")
-    assert metrics["tester_threshold_from_coding"] is not False
+    assert threshold["source"] == "tester"
+    assert threshold["classified"] is True
+    assert metrics["tester_threshold_from_tester"] is True
 
     # §10: the report must render the run (incl. the threshold remark).
     from bench.report import generate_report
@@ -424,7 +465,11 @@ async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard)
         matrix_path = tmp_path / "matrix.toml"
         matrix_path.write_text(
             MATRIX_TEMPLATE.format(
-                port=port, combo=combo, coder="fake-coder", tester="fake-tester"
+                port=port,
+                combo=combo,
+                coder="fake-coder",
+                tester="fake-tester",
+                extra="",
             ),
             encoding="utf-8",
         )

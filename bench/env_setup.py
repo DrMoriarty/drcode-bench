@@ -130,10 +130,12 @@ def materialize_providers(
       overridden context. Model ids stay untouched so the run reports the
       model the combo asked for.
 
-    The point of the whole mechanism: compaction scenarios S3/S4 set a
-    SMALL context on the coding model WITHOUT touching `DRCODE_*` env
-    (which the run hygiene strips anyway, §13) — the override travels in
-    the generated models.json, the catalog layer drcode honors per role.
+    The point of the whole mechanism: compaction scenarios set a SMALL
+    context on the compacted role (S3 → coding, S4 → tester — since
+    drcode 0.5.0 each compaction gate reads its own role's resolved config)
+    WITHOUT touching `DRCODE_*` env (which the run hygiene strips anyway,
+    §13) — the override travels in the generated models.json, the catalog
+    layer drcode honors per role.
     """
     refs: dict[str, tuple[str, str]] = {}
     wants: dict[tuple[str, str], dict[int, list[str]]] = {}

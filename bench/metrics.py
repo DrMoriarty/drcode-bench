@@ -591,19 +591,21 @@ def analyze_tester_threshold(
 ) -> dict[str, Any] | None:
     """Which model's context limit drove the tester's compactions (§1.2/§13).
 
-    drcode computes the tester's compaction threshold from the CODING
-    model's config (`_fill_over_threshold` uses the coding role) — the
-    benchmark must verify that behavior, not assume it. From the artifacts
-    the denominator is recoverable indirectly: a round that was compacted
-    at trigger_pct with a pre-compaction token estimate T implies an
-    effective limit T / pct * 100 — nearest to the coding limit means the
-    threshold indeed came from the coding model, nearest to the (typically
-    much larger) tester limit would mean drcode regressed. The token
-    estimate comes from the round transcript when its pre-compaction tail
-    survived, otherwise from the recorder log (§5).
+    drcode ≥ 0.5.0 resolves models per role: the tester's mid-round
+    compaction threshold is computed from the TESTER model's config
+    (`_fill_over_threshold(..., AgentRole.TESTER)` uses the tester role) —
+    the benchmark must verify that behavior, not assume it. From the
+    artifacts the denominator is recoverable indirectly: a round that was
+    compacted at trigger_pct with a pre-compaction token estimate T implies
+    an effective limit T / pct * 100 — nearest to the tester limit means the
+    threshold indeed came from the tester model, nearest to the coding
+    limit would mean drcode regressed to the pre-0.5.0 behavior (threshold
+    from the coding config). The token estimate comes from the round
+    transcript when its pre-compaction tail survived, otherwise from the
+    recorder log (§5).
 
     When coding and tester limits COINCIDE the classification is moot —
-    it is reported as 'coding' (no regression possible). `raw_task` is
+    it is reported as 'tester' (no regression possible). `raw_task` is
     the unparsed task JSON. None = no tester-phase compaction to classify."""
     events = parse_events(raw_task.get("events") or [])
     tester_starts = [e for e in events.compactions if e.phase == "tester" and e.kind == "start"]
@@ -611,7 +613,9 @@ def analyze_tester_threshold(
         return None
     coding = limits.get("coding")
     tester = limits.get("tester")
-    moot = coding is not None and (tester is None or tester <= coding)
+    # The expected denominator is the tester's own limit; only coinciding
+    # limits make the two sources indistinguishable (no regression possible).
+    moot = coding is not None and tester is not None and tester == coding
 
     observations: list[dict[str, Any]] = []
     sources: set[str] = set()
@@ -649,11 +653,11 @@ def analyze_tester_threshold(
         implied = round(tokens * 100 / trigger) if tokens and trigger else None
         source = "unknown"
         if moot:
-            source = "coding"  # thresholds coincide — no regression possible
+            source = "tester"  # thresholds coincide — no regression possible
             classified = True
         elif implied is not None and coding is not None and tester is not None:
             classified = True
-            source = "coding" if abs(implied - coding) <= abs(implied - tester) else "tester"
+            source = "tester" if abs(implied - tester) <= abs(implied - coding) else "coding"
         sources.add(source)
         observations.append(
             {
@@ -672,10 +676,10 @@ def analyze_tester_threshold(
             implied = round(tokens * 100 / e.trigger_pct) if tokens and e.trigger_pct else None
             source = "unknown"
             if moot:
-                source, classified = "coding", True
-            elif implied is not None and coding and tester and tester > coding:
+                source, classified = "tester", True
+            elif implied is not None and coding and tester and tester != coding:
                 classified = True
-                source = "coding" if abs(implied - coding) <= abs(implied - tester) else "tester"
+                source = "tester" if abs(implied - tester) <= abs(implied - coding) else "coding"
             sources.add(source)
             observations.append(
                 {
@@ -699,9 +703,10 @@ def analyze_tester_threshold(
         "classified": classified,
         "observations": observations,
         "remark": (
-            "drcode computes the tester compaction threshold from the "
-            "CODING model's config (§1.2/§13) — 'coding' is the expected "
-            "classification; 'tester' would be a regression."
+            "drcode ≥ 0.5.0 computes the tester compaction threshold from "
+            "the TESTER model's config (per-role resolution, §1.2) — "
+            "'tester' is the expected classification; 'coding' would be a "
+            "regression."
         ),
     }
 
@@ -1537,20 +1542,22 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         if t["kind"] == "bug"
     ]
 
-    # Tester-threshold source (§1.2/§13, S4): drcode derives the tester's
-    # compaction threshold from the CODING model's config — verified here,
-    # not assumed. None = no tester compaction to classify.
+    # Tester-threshold source (§1.2, S4): since drcode 0.5.0 the tester's
+    # compaction threshold comes from the TESTER model's config (per-role
+    # resolution) — verified here, not assumed. False = a threshold computed
+    # from the coding model's config (a regression). None = no tester
+    # compaction to classify (or only unclassified observations).
     tester_sources = [
         t["compactions"]["tester_threshold"] for t in tasks if t["compactions"]["tester_threshold"]
     ]
     if not tester_sources:
-        tester_threshold_from_coding: bool | None = None
-    elif any(s["source"] in ("tester", "mixed") for s in tester_sources):
-        tester_threshold_from_coding = False
-    elif any(s["source"] == "coding" for s in tester_sources):
-        tester_threshold_from_coding = True
+        tester_threshold_from_tester: bool | None = None
+    elif any(s["source"] in ("coding", "mixed") for s in tester_sources):
+        tester_threshold_from_tester = False
+    elif any(s["source"] == "tester" for s in tester_sources):
+        tester_threshold_from_tester = True
     else:
-        tester_threshold_from_coding = None  # only unclassified observations
+        tester_threshold_from_tester = None  # only unclassified observations
 
     # The development/testing gate (§7 S6): coder and tester never in
     # flight at the same time — transcripts first, recorder log on top
@@ -1605,7 +1612,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         "bug_round_trips": bug_round_trips,
         "gate": gate,
         "context_limits": context_limits or None,
-        "tester_threshold_from_coding": tester_threshold_from_coding,
+        "tester_threshold_from_tester": tester_threshold_from_tester,
         "tasks": tasks,
         "model_log": model_log,
         "proxy": proxy,

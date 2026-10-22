@@ -550,7 +550,8 @@ def test_analyze_task_mid_run_vs_turn_boundary() -> None:
 
 def test_tester_threshold_moot_when_limits_equal() -> None:
     """Equal coding/tester limits: no regression is possible — the
-    classification must say 'coding', not 'tester'/'unknown'."""
+    classification must say 'tester' (the expected source), not
+    'coding'/'unknown'."""
     task = _tester_task(
         [{"at": T0, "text": "Context fill 87% — pausing the tester round to compact history…"}],
         [
@@ -563,15 +564,15 @@ def test_tester_threshold_moot_when_limits_equal() -> None:
     )
     result = analyze_tester_threshold(task, {"coding": 100000, "tester": 100000})
     assert result is not None
-    assert result["source"] == "coding"
+    assert result["source"] == "tester"
     assert result["classified"] is True
 
 
-def test_tester_threshold_classifies_coding_from_recorder() -> None:
+def test_tester_threshold_classifies_tester_from_recorder() -> None:
     """Distinct limits: the pre-compaction tokens come from the recorder
     log (the mid-round compaction replaced the round in place — the
     pre-compaction responses are gone); the implied limit must land on the
-    CODING value (§1.2/§13)."""
+    TESTER value (drcode ≥ 0.5.0: per-role gate, §1.2)."""
     task = _tester_task(
         [{"at": T1, "text": "Context fill 87% — compacting the testing round…"}],
         [
@@ -596,20 +597,21 @@ def test_tester_threshold_classifies_coding_from_recorder() -> None:
     ]
     result = analyze_tester_threshold(
         task,
-        {"coding": 100000, "tester": 500000},
+        {"coding": 500000, "tester": 100000},
         log_entries=entries,
         tester_tag="tester-model@http://g/v1",
     )
     assert result is not None
     assert result["observations"][0]["pre_tokens_est"] == 87000
     assert result["observations"][0]["implied_max_context_tokens"] == 100000
-    assert result["source"] == "coding"
+    assert result["source"] == "tester"
     assert result["classified"] is True
 
 
-def test_tester_threshold_flags_tester_source_as_regression() -> None:
+def test_tester_threshold_flags_coding_source_as_regression() -> None:
     """The regression case the metrics exist to catch: the implied limit
-    matches the TESTER model's config, not the coding one (§1.2/§13)."""
+    matches the CODING model's config, not the tester's own (the pre-0.5.0
+    behavior, §1.2)."""
     task = _tester_task(
         [{"at": T1, "text": "Context fill 17% — compacting the testing round…"}],
         [
@@ -629,13 +631,13 @@ def test_tester_threshold_flags_tester_source_as_regression() -> None:
     ]
     result = analyze_tester_threshold(
         task,
-        {"coding": 100000, "tester": 500000},
+        {"coding": 500000, "tester": 100000},
         log_entries=entries,
         tester_tag="tester-model@http://g/v1",
     )
     assert result is not None
     assert result["observations"][0]["implied_max_context_tokens"] == 500000
-    assert result["source"] == "tester"
+    assert result["source"] == "coding"
 
 
 def test_tester_threshold_none_without_tester_compaction() -> None:
@@ -687,11 +689,12 @@ def test_read_context_limits_reconstructed_from_configs(tmp_path: Path) -> None:
 
 def test_extract_run_metrics_carries_threshold_verdict(tmp_path: Path) -> None:
     """The run-level flag exists in metrics.json and is False on the
-    regression shape (§1.2: the state must be visible in the report)."""
+    regression shape (the threshold computed from the coding model's
+    config — §1.2: the state must be visible in the report)."""
     tasks_dir = tmp_path / "workspace" / ".drcode" / "tasks"
     tasks_dir.mkdir(parents=True)
     task = _tester_task(
-        [{"at": T1, "text": "Context fill 17% — compacting the testing round…"}],
+        [{"at": T1, "text": "Context fill 85% — compacting the testing round…"}],
         [
             [
                 request_msg("verify", T0),
@@ -744,7 +747,7 @@ def test_extract_run_metrics_carries_threshold_verdict(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     metrics = extract_run_metrics(tmp_path, write=False)
-    assert metrics["tester_threshold_from_coding"] is False
+    assert metrics["tester_threshold_from_tester"] is False
     assert metrics["totals"]["n_summaries"] >= 1
 
 
