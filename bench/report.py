@@ -496,6 +496,24 @@ def _md_inline(text: str) -> str:
     return text
 
 
+def _verdict_row_class(cell: str) -> str | None:
+    """CSS class for a table row, derived from the text of its verdict
+    cell: green-only → `verdict-ok`, failed-only → `verdict-fail`,
+    a mix of both (one combo with correct and failed repeats) →
+    `verdict-mixed`; anything else (`settled-but-flagged`, `unknown`,
+    missing column) stays uncoloured."""
+    verdicts = {v.strip() for v in cell.split(",")}
+    has_ok = "green" in verdicts
+    has_fail = "failed" in verdicts
+    if has_ok and has_fail:
+        return "verdict-mixed"
+    if has_fail:
+        return "verdict-fail"
+    if has_ok:
+        return "verdict-ok"
+    return None
+
+
 def _md_to_html(md: str) -> str:
     """A small renderer for the report's own markdown subset: headings,
     paragraphs, `- ` lists and pipe tables. Enough for report.html without
@@ -510,6 +528,11 @@ def _md_to_html(md: str) -> str:
         "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;vertical-align:top;}",
         "th{background:#f4f4f4;}",
         "code{background:#f4f4f4;padding:0 4px;}",
+        # Verdict colouring (§10): pale green — all repeats green, pale red —
+        # all repeats failed, pale yellow — a summary row mixing both.
+        "tr.verdict-ok{background:#d9ead3;}",
+        "tr.verdict-fail{background:#f4cccc;}",
+        "tr.verdict-mixed{background:#fff2cc;}",
         "h1,h2,h3{margin-top:1.6rem;}",
         "</style></head><body>",
     ]
@@ -537,10 +560,23 @@ def _md_to_html(md: str) -> str:
                     rows.append(cells)
                 i += 1
             out.append("<table>")
+            verdict_col: int | None = None
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
+                if r == 0:
+                    # Colouring hook: locate the verdict column of the
+                    # summary/runs tables (the dissection tables have none).
+                    for c, cell in enumerate(row):
+                        if cell.lower() in ("verdict", "verdicts"):
+                            verdict_col = c
+                            break
+                cls = ""
+                if r > 0 and verdict_col is not None and verdict_col < len(row):
+                    row_cls = _verdict_row_class(row[verdict_col])
+                    if row_cls:
+                        cls = f' class="{row_cls}"'
                 out.append(
-                    "<tr>" + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row) + "</tr>"
+                    f"<tr{cls}>" + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row) + "</tr>"
                 )
             out.append("</table>")
         elif line.lstrip().startswith("- "):
