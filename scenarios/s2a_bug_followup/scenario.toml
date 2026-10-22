@@ -3,6 +3,13 @@
 # verdict re-queues the task via TaskManager.send(), the follow-up comment
 # reaches the coder as one prompt, the second testing round passes.
 
+# NB on brief wording: the e2e test (tests/test_scenarios_e2e.py) scripts
+# the coder via the fake gateway, which keys its round-1 fix on the
+# literals "FAILED" / "test_pct" appearing in the prompt. The brief must
+# NOT contain them (or the scripted coder would fix pct() on round 1 and
+# the run would settle PASSED with a single testing round). Keep the
+# verification rule paraphrased (no verdict-tool English, no test names).
+
 id = "s2a_bug_followup"
 timeout = 45  # minutes — soft limit (§4: 30–60 min)
 
@@ -13,10 +20,21 @@ text = """
 В calc.py функция div(a, b) при нулевом делителе бросает ZeroDivisionError,
 а по контракту должна бросать ValueError.
 
-Исправьте ТОЛЬКО div(). Функцию pct() НЕ трогайте: она вне объёма этой
-задачи, её чинит отдельная задача. Проверьте себя точечно:
-`pytest test_calc.py::test_div` должен быть зелёным. Полный pytest может
-оставаться красным из-за pct() — это ожидаемо и к вашей задаче не относится.
+Исправьте ТОЛЬКО div(). Функцию pct() не трогайте: её починка вынесена
+в отдельную задачу, и правки в ней будут конфликтовать с той задачей.
+Не чините ничего вне этого объёма, даже если полный `pytest` остаётся
+красным из-за других функций: задача будет возвращена на доработку, где
+объём будет расширен.
+Точечная самопроверка кодера: `pytest test_calc.py::test_div` — она должна
+быть зелёной.
+
+Правило верификации (обязательное, адресовано проверке задачи): прогоните
+ПОЛНЫЙ `pytest` в корне задачи. ЛЮБОЙ упавший тест означает, что проверка
+НЕ пройдена: ставьте вердикт «проверка не пройдена» и возвращайте задачу
+на доработку — в том числе если падение выглядит как ранее существовавший
+дефект вне объёма задачи. Вердикт «проверка пройдена» возможен ТОЛЬКО при
+полностью зелёном `pytest`. Само по себе это правило НЕ даёт права чинить
+что-либо вне указанного выше объёма.
 """
 
 [[followups]]

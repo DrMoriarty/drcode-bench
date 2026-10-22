@@ -7,6 +7,13 @@
 # api_key поддерживает подстановку из окружения хоста: "env:NAME" читает
 # переменную NAME при генерации config-home/drcode/models.json. Пустая строка
 # = без ключа (локальные OpenAI-совместимые шлюзы).
+#
+# ВНИМАНИЕ: provider-a — ЗАГЛУШКА (api.provider-a.example не существует).
+# Реальный прогон (`uv run bench run ...`) требует подставить рабочий
+# base_url/провайдера и задать его api_key через переменную окружения
+# (например PROVIDER_A_KEY); иначе агент не выйдет на модель и ран зависнет
+# в task=queued с нулём запросов к модели. Для локальных прогонов без сети
+# используйте tests/fake_gateway.py (см. tests/test_scenarios_e2e.py).
 
 [providers.provider-a]
 base_url = "https://api.provider-a.example/v1"
