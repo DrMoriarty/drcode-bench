@@ -205,15 +205,16 @@ from drcode.tui.app import DrCodeApp
 from drcode.task_manager import TaskManager
 from drcode.models import TaskKind
 
+
 async def main(scenario, combo, run_dir):
-    install_recorder(run_dir)        # §5: monkeypatch agent_model.build_model
+    install_recorder(run_dir)  # §5: monkeypatch agent_model.build_model
     app = DrCodeApp(Path("workspace"))
     async with app.run_test(size=(120, 40)) as pilot:
         manager = app.manager
         for brief in scenario.briefs:
             manager.create(brief.title, brief.text, kind=brief.kind)
         sim = asyncio.create_task(
-            user_simulator(app, scenario, pilot)   # §6
+            user_simulator(app, scenario, pilot)  # §6
         )
         ok = await wait_settle(app, scenario, pilot, timeout=scenario.timeout)
         sim.cancel()

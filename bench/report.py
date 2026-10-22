@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -152,19 +152,12 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pairs = []
     for (scenario, combo), group in sorted(groups.items()):
         wall = _agg([m.get("wall_time_s", {}).get("settle") for m in group])
-        compactions = _agg(
-            [(m.get("totals") or {}).get("n_compactions") for m in group]
-        )
+        compactions = _agg([(m.get("totals") or {}).get("n_compactions") for m in group])
         rounds = _agg([(m.get("totals") or {}).get("n_testing_rounds") for m in group])
         round_trips = _agg([len(m.get("bug_round_trips") or []) for m in group])
-        sim_interventions = _agg(
-            [(m.get("user_sim") or {}).get("interventions") for m in group]
-        )
+        sim_interventions = _agg([(m.get("user_sim") or {}).get("interventions") for m in group])
         tokens = _agg(
-            [
-                ((m.get("totals") or {}).get("usage") or {}).get("output_tokens")
-                for m in group
-            ]
+            [((m.get("totals") or {}).get("usage") or {}).get("output_tokens") for m in group]
         )
         requests = _agg([_model_log(m).get("requests") for m in group])
         latency_p50 = _agg([_model_log(m).get("latency_ms_p50") for m in group])
@@ -186,32 +179,19 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "latency_ms_p50": latency_p50,
                 "latency_ms_p95": latency_p95,
                 "tokens_by_role": _tokens_by_role(group),
-                "gate": sorted(
-                    {
-                        ((m.get("gate") or {}).get("verdict") or "n/a")
-                        for m in group
-                    }
-                ),
-                "stability": sorted(
-                    {_stability_flags(m) for m in group} - {"clean"}
-                )
-                or ["clean"],
+                "gate": sorted({((m.get("gate") or {}).get("verdict") or "n/a") for m in group}),
+                "stability": sorted({_stability_flags(m) for m in group} - {"clean"}) or ["clean"],
             }
         )
     return pairs
 
 
-def _representative_run(
-    group: list[dict[str, Any]], wall: dict[str, Any]
-) -> str | None:
+def _representative_run(group: list[dict[str, Any]], wall: dict[str, Any]) -> str | None:
     """The run whose artifacts the summary cells link to: the median-wall
     repeat (the first run when the median is not a member / single run)."""
     median = wall.get("median")
     for m in group:
-        if (
-            median is not None
-            and m.get("wall_time_s", {}).get("settle") == median
-        ):
+        if median is not None and m.get("wall_time_s", {}).get("settle") == median:
             return m.get("run_id")
     return group[0].get("run_id") if group else None
 
@@ -245,7 +225,10 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     ]
     for p in pairs:
         repr_run = p.get("repr_run")
-        link = lambda text: _cell(text, repr_run)  # noqa: E731
+
+        def link(text: str, _rr: str | None = repr_run) -> str:
+            return _cell(text, _rr)
+
         lat_p50 = p["latency_ms_p50"]
         lat_str = (
             f"{_fmt(lat_p50['median'] / 1000 if lat_p50['median'] is not None else None)} / "
@@ -296,9 +279,10 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
         if sim.get("failures"):
             sim_str += " ⚠"
         tasks = m.get("tasks") or []
-        verdicts = "/".join(
-            f"{t.get('kind')}:{t.get('verification') or t.get('status')}" for t in tasks
-        ) or "—"
+        verdicts = (
+            "/".join(f"{t.get('kind')}:{t.get('verification') or t.get('status')}" for t in tasks)
+            or "—"
+        )
         gate = (m.get("gate") or {}).get("verdict") or "n/a"
         if gate == "OVERLAP":
             gate += " ⚠"
@@ -341,9 +325,7 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
         # and the run continues UNCOMPRESSED — but the benchmark must
         # recognize and surface that state, plus repeat compactions (the
         # summary did not stick → degradation signal).
-        comp_failed = (m.get("totals", {}).get("stability", {}) or {}).get(
-            "compaction_failed"
-        ) or 0
+        comp_failed = (m.get("totals", {}).get("stability", {}) or {}).get("compaction_failed") or 0
         if comp_failed:
             lines.append(
                 f"⚠ COMPACTION FAILED ×{comp_failed}: drcode disabled the "
@@ -381,11 +363,7 @@ def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
                 f"model config — {flag}."
             )
             lines.append("")
-        savings = [
-            s
-            for t in m.get("tasks") or []
-            for s in (t.get("compaction_savings") or [])
-        ]
+        savings = [s for t in m.get("tasks") or [] for s in (t.get("compaction_savings") or [])]
         if savings:
             lines.append("Compaction savings (token estimates from response usage):\n")
             lines.append(
@@ -472,7 +450,7 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
     lines = [
         "# drcode-bench report",
         "",
-        f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}  ",
+        f"Generated: {datetime.now(UTC).isoformat(timespec='seconds')}  ",
         f"Runs dir: `{runs_dir}` · runs: {len(runs)} · pairs: {len(pairs)}",
         "",
         "## Summary (scenario × combo)",
@@ -529,8 +507,7 @@ def _md_to_html(md: str) -> str:
         "<style>",
         "body{font-family:system-ui,sans-serif;margin:2rem;max-width:160rem;}",
         "table{border-collapse:collapse;margin:1rem 0;}",
-        "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;"
-        "vertical-align:top;}",
+        "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;vertical-align:top;}",
         "th{background:#f4f4f4;}",
         "code{background:#f4f4f4;padding:0 4px;}",
         "h1,h2,h3{margin-top:1.6rem;}",
@@ -563,9 +540,7 @@ def _md_to_html(md: str) -> str:
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 out.append(
-                    "<tr>"
-                    + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row)
-                    + "</tr>"
+                    "<tr>" + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row) + "</tr>"
                 )
             out.append("</table>")
         elif line.lstrip().startswith("- "):
@@ -576,8 +551,10 @@ def _md_to_html(md: str) -> str:
             out.append("</ul>")
         else:
             paragraph: list[str] = []
-            while i < len(lines) and lines[i].strip() and not lines[i].lstrip().startswith(
-                ("|", "- ", "# ")
+            while (
+                i < len(lines)
+                and lines[i].strip()
+                and not lines[i].lstrip().startswith(("|", "- ", "# "))
             ):
                 paragraph.append(_md_inline(lines[i]))
                 i += 1

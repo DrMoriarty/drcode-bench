@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from bench.env_setup import (
     EnvSetupError,
     RunPaths,
@@ -86,7 +85,7 @@ def scenario_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def combo(matrix_file: Path) -> Combo:
-    providers, combos = load_matrix(matrix_file)
+    _providers, combos = load_matrix(matrix_file)
     assert combos, "matrix fixture must define combos"
     return combos[0]
 
@@ -170,7 +169,10 @@ def test_prepare_run_testing_commit_local_remote(scenario_dir, combo, matrix_fil
 def test_prepare_run_rejects_bad_finalization(scenario_dir, combo, matrix_file, tmp_path):
     with pytest.raises(EnvSetupError, match="task_finalization"):
         prepare_run(
-            scenario_dir, combo, tmp_path / "r3", matrix_path=matrix_file,
+            scenario_dir,
+            combo,
+            tmp_path / "r3",
+            matrix_path=matrix_file,
             task_finalization="none",
         )
 
@@ -196,17 +198,13 @@ def test_subprocess_env_strips_drcode_and_pins_xdg(tmp_path):
             del os.environ[key]
 
 
-def test_verify_resolution_returns_expected_models(
-    scenario_dir, combo, matrix_file, tmp_path
-):
+def test_verify_resolution_returns_expected_models(scenario_dir, combo, matrix_file, tmp_path):
     """Pre-flight (§3 end): resolve() for every role returns the expected
     provider/model — against the generated config files only."""
     run_dir = tmp_path / "runs" / "pf"
     paths = prepare_run(scenario_dir, combo, run_dir, matrix_path=matrix_file)
 
-    resolved = verify_resolution(
-        paths.workspace, paths.config_home, combo, matrix_path=matrix_file
-    )
+    resolved = verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
     assert resolved == {
         "coding": "fake-a/big-coder",
         "tester": "fake-b/small-8b",
@@ -214,9 +212,7 @@ def test_verify_resolution_returns_expected_models(
     }
 
 
-def test_verify_resolution_detects_mismatch(
-    scenario_dir, combo, matrix_file, tmp_path
-):
+def test_verify_resolution_detects_mismatch(scenario_dir, combo, matrix_file, tmp_path):
     run_dir = tmp_path / "runs" / "pf2"
     paths = prepare_run(scenario_dir, combo, run_dir, matrix_path=matrix_file)
     # Sabotage the catalog: remove the provider the tester points at —
@@ -228,9 +224,7 @@ def test_verify_resolution_detects_mismatch(
     catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
 
     with pytest.raises(EnvSetupError, match="pre-flight failed for role 'tester'"):
-        verify_resolution(
-            paths.workspace, paths.config_home, combo, matrix_path=matrix_file
-        )
+        verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
 
 
 def test_verify_resolution_env_override_is_not_honored(
@@ -243,9 +237,7 @@ def test_verify_resolution_env_override_is_not_honored(
     monkeypatch.setenv("DRCODE_BASE_URL", "http://host-override.local/v1")
     run_dir = tmp_path / "runs" / "pf3"
     paths = prepare_run(scenario_dir, combo, run_dir, matrix_path=matrix_file)
-    resolved = verify_resolution(
-        paths.workspace, paths.config_home, combo, matrix_path=matrix_file
-    )
+    resolved = verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
     assert resolved["coding"] == "fake-a/big-coder"
 
 
@@ -326,13 +318,9 @@ def test_materialize_patches_catalog_entry_in_place(
     small = load_matrix(override_matrix_file)[1][0]
     materialized, refs = materialize_providers(small, providers)
     assert refs["coding"] == ("fake-a", "big-coder")
-    assert (
-        materialized["fake-a"].model("big-coder").max_context_tokens == 3000
-    )
+    assert materialized["fake-a"].model("big-coder").max_context_tokens == 3000
     # Untouched roles keep their values.
-    assert (
-        materialized["fake-b"].model("small-8b").max_context_tokens == 8192
-    )
+    assert materialized["fake-b"].model("small-8b").max_context_tokens == 8192
 
 
 def test_materialize_resolves_conflict_with_virtual_provider(
@@ -371,9 +359,7 @@ def test_prepare_run_writes_override_into_catalog(
     )
     catalog = json.loads(paths.models_catalog.read_text(encoding="utf-8"))
     fake_a = next(p for p in catalog["providers"] if p["name"] == "fake-a")
-    assert next(m for m in fake_a["models"] if m["id"] == "big-coder")[
-        "max_context_tokens"
-    ] == 3000
+    assert next(m for m in fake_a["models"] if m["id"] == "big-coder")["max_context_tokens"] == 3000
     project = json.loads(paths.project_config.read_text(encoding="utf-8"))
     assert project["models"]["coding"] == "fake-a/big-coder"
 

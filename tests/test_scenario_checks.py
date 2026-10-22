@@ -184,9 +184,7 @@ def test_s2a_checks_green(tmp_path: Path) -> None:
     "mutate",
     [
         pytest.param(lambda msgs: msgs[:2], id="one-round-only"),
-        pytest.param(
-            lambda msgs: msgs + [msgs[2], msgs[3]], id="follow-up-seen-twice"
-        ),
+        pytest.param(lambda msgs: [*msgs, msgs[2], msgs[3]], id="follow-up-seen-twice"),
         pytest.param(lambda msgs: [], id="no-follow-up-at-all"),
     ],
 )
@@ -267,16 +265,28 @@ def test_s2b_checks_bite_on_queue_priority(tmp_path: Path, bug_activated: str) -
     workspace = run_dir / "workspace"
     scenario = load_scenario_toml("s2b_bug_report")
     write_task(
-        workspace, id="briefA", title=scenario["briefs"][0]["title"],
-        kind="feature", activated_at="2025-06-01T10:00:05+00:00", tester_messages=[[]],
+        workspace,
+        id="briefA",
+        title=scenario["briefs"][0]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:05+00:00",
+        tester_messages=[[]],
     )
     write_task(
-        workspace, id="briefB", title=scenario["briefs"][1]["title"],
-        kind="feature", activated_at="2025-06-01T10:00:20+00:00", tester_messages=[[]],
+        workspace,
+        id="briefB",
+        title=scenario["briefs"][1]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:20+00:00",
+        tester_messages=[[]],
     )
     write_task(
-        workspace, id="bug1", title="Починить pct()", kind="bug",
-        activated_at=bug_activated, tester_messages=[[]],
+        workspace,
+        id="bug1",
+        title="Починить pct()",
+        kind="bug",
+        activated_at=bug_activated,
+        tester_messages=[[]],
     )
     result = run_checks("s2b_bug_report", workspace)
     assert result.returncode == 1
@@ -288,17 +298,29 @@ def test_s2b_checks_bite_on_unverified_bug(tmp_path: Path) -> None:
     workspace = run_dir / "workspace"
     scenario = load_scenario_toml("s2b_bug_report")
     write_task(
-        workspace, id="briefA", title=scenario["briefs"][0]["title"],
-        kind="feature", activated_at="2025-06-01T10:00:05+00:00", tester_messages=[[]],
+        workspace,
+        id="briefA",
+        title=scenario["briefs"][0]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:05+00:00",
+        tester_messages=[[]],
     )
     write_task(
-        workspace, id="briefB", title=scenario["briefs"][1]["title"],
-        kind="feature", activated_at="2025-06-01T10:00:20+00:00", tester_messages=[[]],
+        workspace,
+        id="briefB",
+        title=scenario["briefs"][1]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:20+00:00",
+        tester_messages=[[]],
     )
     write_task(
-        workspace, id="bug1", title="Починить pct()", kind="bug",
+        workspace,
+        id="bug1",
+        title="Починить pct()",
+        kind="bug",
         activated_at="2025-06-01T10:00:10+00:00",
-        verification=None, tester_messages=[],  # never tested
+        verification=None,
+        tester_messages=[],  # never tested
     )
     result = run_checks("s2b_bug_report", workspace)
     assert result.returncode == 1
@@ -308,9 +330,7 @@ def test_s2b_checks_bite_on_unverified_bug(tmp_path: Path) -> None:
 
 
 def s5_answer() -> str:
-    return load_scenario_toml("s5_clarification")["clarification_answers"][0][
-        "answer"
-    ].strip()
+    return load_scenario_toml("s5_clarification")["clarification_answers"][0]["answer"].strip()
 
 
 def s5_messages(*, duplicate_answer: bool = False, answer_pending: bool = False) -> list[dict]:
@@ -440,9 +460,18 @@ def s3_task_messages(scenario_id: str = "s3_compaction_coder") -> tuple[list[dic
 
 def s3_events() -> list[dict]:
     return [
-        {"at": "2025-06-01T10:00:10+00:00", "text": "Context fill 87% — pausing the run to compact history…"},
-        {"at": "2025-06-01T10:00:11+00:00", "text": "Context fill 87% — pausing the agent and compacting history…"},
-        {"at": "2025-06-01T10:00:12+00:00", "text": "Context compacted: history summarized, original task prompt(s) kept verbatim."},
+        {
+            "at": "2025-06-01T10:00:10+00:00",
+            "text": "Context fill 87% — pausing the run to compact history…",
+        },
+        {
+            "at": "2025-06-01T10:00:11+00:00",
+            "text": "Context fill 87% — pausing the agent and compacting history…",
+        },
+        {
+            "at": "2025-06-01T10:00:12+00:00",
+            "text": "Context compacted: history summarized, original task prompt(s) kept verbatim.",
+        },
     ]
 
 
@@ -484,7 +513,9 @@ def test_s3_checks_green(tmp_path: Path) -> None:
                 **t,
                 # Summary present but the ORIGINAL prompt lost (§1.4 violated).
                 "messages": [
-                    m for m in t["messages"] if "найдите модуль термина" not in json.dumps(m, ensure_ascii=False)
+                    m
+                    for m in t["messages"]
+                    if "найдите модуль термина" not in json.dumps(m, ensure_ascii=False)
                 ],
             },
             id="original-prompt-lost",
@@ -523,7 +554,9 @@ def s4_tester_rounds(scenario_id: str = "s4_compaction_tester") -> list[list[dic
         [
             request_msg("Verify completed task: полный листинг data/listing.txt"),
             response_msg([tool_call_part("run_bash")]),
-            request_msg("[context summary]\n\nПрочитан листинг: 25000 строк, entry 025000 в конце."),
+            request_msg(
+                "[context summary]\n\nПрочитан листинг: 25000 строк, entry 025000 в конце."
+            ),
             response_msg([tool_call_part("set_verification")]),
             response_msg([text_part("Листинг проверен полностью.")]),
         ]
@@ -532,9 +565,18 @@ def s4_tester_rounds(scenario_id: str = "s4_compaction_tester") -> list[list[dic
 
 def s4_events() -> list[dict]:
     return [
-        {"at": "2025-06-01T10:00:20+00:00", "text": "Context fill 87% — pausing the tester round to compact history…"},
-        {"at": "2025-06-01T10:00:21+00:00", "text": "Context fill 87% — compacting the testing round…"},
-        {"at": "2025-06-01T10:00:22+00:00", "text": "Context compacted: testing round summarized, original prompt kept verbatim."},
+        {
+            "at": "2025-06-01T10:00:20+00:00",
+            "text": "Context fill 87% — pausing the tester round to compact history…",
+        },
+        {
+            "at": "2025-06-01T10:00:21+00:00",
+            "text": "Context fill 87% — compacting the testing round…",
+        },
+        {
+            "at": "2025-06-01T10:00:22+00:00",
+            "text": "Context compacted: testing round summarized, original prompt kept verbatim.",
+        },
     ]
 
 
@@ -641,7 +683,12 @@ def s6_tasks() -> list[dict]:
             "activated_at": "2025-06-01T10:00:05+00:00",
             "messages": [
                 s6_msg("request", "2025-06-01T10:00:10+00:00", bug_text),
-                s6_msg("response", "2025-06-01T10:00:40+00:00", "median() исправлен.", usage=coder_usage),
+                s6_msg(
+                    "response",
+                    "2025-06-01T10:00:40+00:00",
+                    "median() исправлен.",
+                    usage=coder_usage,
+                ),
             ],
             "tester_messages": [
                 [
@@ -661,7 +708,12 @@ def s6_tasks() -> list[dict]:
             "activated_at": "2025-06-01T10:01:20+00:00",
             "messages": [
                 s6_msg("request", "2025-06-01T10:01:30+00:00", feature_text),
-                s6_msg("response", "2025-06-01T10:02:00+00:00", "stdev() реализован.", usage=coder_usage),
+                s6_msg(
+                    "response",
+                    "2025-06-01T10:02:00+00:00",
+                    "stdev() реализован.",
+                    usage=coder_usage,
+                ),
             ],
             "tester_messages": [
                 [
@@ -694,17 +746,37 @@ def test_s6_checks_green_with_recorder_log(tmp_path: Path) -> None:
     for task in s6_tasks():
         write_task(workspace, **task)
     log = [
-        {"role": "coder-m@a", "ts": 1750000000.0 + 10, "latency_ms": 5000,
-         "usage": {"input_tokens": 500, "output_tokens": 50}},
-        {"role": "coder-m@a", "ts": 1750000000.0 + 90, "latency_ms": 5000,
-         "usage": {"input_tokens": 500, "output_tokens": 50}},
-        {"role": "tester-m@b", "ts": 1750000000.0 + 70, "latency_ms": 5000,
-         "usage": {"input_tokens": 800, "output_tokens": 30}},
-        {"role": "tester-m@b", "ts": 1750000000.0 + 150, "latency_ms": 5000,
-         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        {
+            "role": "coder-m@a",
+            "ts": 1750000000.0 + 10,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 500, "output_tokens": 50},
+        },
+        {
+            "role": "coder-m@a",
+            "ts": 1750000000.0 + 90,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 500, "output_tokens": 50},
+        },
+        {
+            "role": "tester-m@b",
+            "ts": 1750000000.0 + 70,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 800, "output_tokens": 30},
+        },
+        {
+            "role": "tester-m@b",
+            "ts": 1750000000.0 + 150,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 800, "output_tokens": 30},
+        },
         # Unmatched entry — the compaction agent's (§1.5): never counts.
-        {"role": "tester-m@b", "ts": 1750000000.0 + 20, "latency_ms": 5000,
-         "usage": {"input_tokens": 42, "output_tokens": 7}},
+        {
+            "role": "tester-m@b",
+            "ts": 1750000000.0 + 20,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 42, "output_tokens": 7},
+        },
     ]
     (run_dir / "model_log.jsonl").write_text(
         "\n".join(json.dumps(e) for e in log) + "\n", encoding="utf-8"
@@ -721,14 +793,30 @@ def test_s6_checks_bite_on_recorder_overlap(tmp_path: Path) -> None:
     for task in s6_tasks():
         write_task(workspace, **task)
     log = [
-        {"role": "coder-m@a", "ts": 1750000000.0 + 10, "latency_ms": 60000,
-         "usage": {"input_tokens": 500, "output_tokens": 50}},
-        {"role": "tester-m@b", "ts": 1750000000.0 + 40, "latency_ms": 60000,
-         "usage": {"input_tokens": 800, "output_tokens": 30}},
-        {"role": "coder-m@a", "ts": 1750000000.0 + 90, "latency_ms": 5000,
-         "usage": {"input_tokens": 500, "output_tokens": 50}},
-        {"role": "tester-m@b", "ts": 1750000000.0 + 150, "latency_ms": 5000,
-         "usage": {"input_tokens": 800, "output_tokens": 30}},
+        {
+            "role": "coder-m@a",
+            "ts": 1750000000.0 + 10,
+            "latency_ms": 60000,
+            "usage": {"input_tokens": 500, "output_tokens": 50},
+        },
+        {
+            "role": "tester-m@b",
+            "ts": 1750000000.0 + 40,
+            "latency_ms": 60000,
+            "usage": {"input_tokens": 800, "output_tokens": 30},
+        },
+        {
+            "role": "coder-m@a",
+            "ts": 1750000000.0 + 90,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 500, "output_tokens": 50},
+        },
+        {
+            "role": "tester-m@b",
+            "ts": 1750000000.0 + 150,
+            "latency_ms": 5000,
+            "usage": {"input_tokens": 800, "output_tokens": 30},
+        },
     ]
     (run_dir / "model_log.jsonl").write_text(
         "\n".join(json.dumps(e) for e in log) + "\n", encoding="utf-8"

@@ -32,7 +32,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -285,8 +284,16 @@ class Runner:
             rc, out, err = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as e:
             rc = 124
-            out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            out = (
+                e.stdout.decode("utf-8", "replace")
+                if isinstance(e.stdout, bytes)
+                else (e.stdout or "")
+            )
+            err = (
+                e.stderr.decode("utf-8", "replace")
+                if isinstance(e.stderr, bytes)
+                else (e.stderr or "")
+            )
             err += f"\n[runner] subprocess killed after {job.timeout_seconds + GRACE_SECONDS:.0f} s"
         elapsed = time.monotonic() - started
         (run_dir / "stdout.log").write_text(out or "", encoding="utf-8")
@@ -306,7 +313,7 @@ class Runner:
                 + (f" (infra retry {attempt})" if attempt else "")
                 + f" → {run_dir.name}"
             )
-            rc, result, elapsed = self._attempt(job, run_dir)
+            rc, result, _elapsed = self._attempt(job, run_dir)
             if result is not None and result.get("ok") is True:
                 outcome.ok = True
                 outcome.reason = str(result.get("reason") or "ok")
@@ -383,9 +390,7 @@ class Runner:
             },
         }
         out = self.runs_dir / "runner-summary.json"
-        out.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return out
 
 

@@ -38,15 +38,15 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from .matrix import (
+    ROLES,
     Combo,
     ProviderSpec,
-    ROLES,
     _resolve_api_key,
     effective_max_context,
     load_matrix,
@@ -134,9 +134,7 @@ def materialize_providers(
     refs: dict[str, tuple[str, str]] = {}
     wants: dict[tuple[str, str], dict[int, list[str]]] = {}
     for role in ROLES:
-        provider_name, model_id = parse_ref(
-            combo.ref(role), f"combo '{combo.name}' role {role}"
-        )
+        provider_name, model_id = parse_ref(combo.ref(role), f"combo '{combo.name}' role {role}")
         refs[role] = (provider_name, model_id)
         ctx = effective_max_context(combo, providers, role)
         wants.setdefault((provider_name, model_id), {}).setdefault(ctx, []).append(role)
@@ -153,9 +151,7 @@ def materialize_providers(
         # Conflict: the first role group in ROLES order wins the original
         # provider (its entry patched to that group's effective ctx), the
         # other groups get clones and their refs are rewritten.
-        kept_ctx = min(
-            by_ctx, key=lambda ctx: min(ROLES.index(r) for r in by_ctx[ctx])
-        )
+        kept_ctx = min(by_ctx, key=lambda ctx: min(ROLES.index(r) for r in by_ctx[ctx]))
         spec = out[provider_name]
         model = spec.model(model_id)
         if model.max_context_tokens != kept_ctx:
@@ -258,9 +254,7 @@ def build_catalog(
 
 def _write_json(path: Path, payload: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
 
 
@@ -342,8 +336,7 @@ def prepare_run(
     run_dir = Path(run_dir)
     if task_finalization not in FINALIZATION_CHOICES:
         raise EnvSetupError(
-            f"task_finalization must be one of {FINALIZATION_CHOICES}, "
-            f"got {task_finalization!r}"
+            f"task_finalization must be one of {FINALIZATION_CHOICES}, got {task_finalization!r}"
         )
     if run_dir.exists() and not exists_ok:
         raise EnvSetupError(f"run dir already exists: {run_dir}")
@@ -424,7 +417,7 @@ def prepare_run(
 
     # 5. git: seed commit; bare remote (created before the workspace repo
     #    references it) for testing_commit.
-    if task_finalization == "testing_commit":
+    if task_finalization == "testing_commit" and remote is not None:
         _git_init_bare(remote)
         _git_init_workspace(workspace, remote)
     else:
@@ -456,9 +449,7 @@ def _isolated_user_config(config_home: Path) -> Iterator[None]:
     import drcode.config as dconfig
 
     saved_dir, saved_file = dconfig._USER_CONFIG_DIR, dconfig.USER_CONFIG_FILE
-    saved_env = {
-        k: v for k, v in os.environ.items() if k.startswith("DRCODE_")
-    }
+    saved_env = {k: v for k, v in os.environ.items() if k.startswith("DRCODE_")}
     for k in saved_env:
         del os.environ[k]
     dconfig._USER_CONFIG_DIR = Path(config_home) / "drcode"
@@ -588,8 +579,7 @@ def _preflight_main() -> int:
         tester=spec["combo"]["tester"],
         compaction=spec["combo"]["compaction"],
         max_context_overrides=tuple(
-            (role, int(value))
-            for role, value in spec["combo"].get("max_context_overrides") or ()
+            (role, int(value)) for role, value in spec["combo"].get("max_context_overrides") or ()
         ),
     )
     matrix_path = Path(spec["matrix_path"]) if spec.get("matrix_path") else None

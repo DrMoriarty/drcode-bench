@@ -42,6 +42,7 @@ The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 
@@ -178,7 +179,7 @@ def _bash_end_run(text: str = "Готово.") -> dict:
 S2A_FIX_DIV = (
     "printf 'def div(a, b):\\n"
     "    if b == 0:\\n"
-    "        raise ValueError(\"zero divisor\")\\n"
+    '        raise ValueError("zero divisor")\\n'
     "    return a / b\\n"
     "\\n"
     "def pct(a, b):\\n"
@@ -189,7 +190,7 @@ S2A_FIX_DIV = (
 S2A_FIX_ALL = (
     "printf 'def div(a, b):\\n"
     "    if b == 0:\\n"
-    "        raise ValueError(\"zero divisor\")\\n"
+    '        raise ValueError("zero divisor")\\n'
     "    return a / b\\n"
     "\\n"
     "def pct(a, b):\\n"
@@ -291,14 +292,14 @@ S2B_FIX_PCT = S2A_FIX_ALL
 S2B_WRITE_FINAL = (
     "printf 'def div(a, b):\\n"
     "    if b == 0:\\n"
-    "        raise ValueError(\"zero divisor\")\\n"
+    '        raise ValueError("zero divisor")\\n'
     "    return a / b\\n"
     "\\n"
     "def pct(a, b):\\n"
     "    return a / b * 100\\n"
     "\\n"
     "def export_api():\\n"
-    "    return [\"div\", \"pct\"]\\n"
+    '    return ["div", "pct"]\\n'
     "' > calc.py"
 )
 
@@ -318,11 +319,11 @@ def _s2b_coder_script(messages: list[dict]) -> dict:
 
 # prices.py implementing the standard the simulator's answer states.
 S5_IMPLEMENT = (
-    "printf 'def format_price(amount, currency=\"RUB\"):\\n"
-    "    symbol = \"₽\" if currency == \"RUB\" else currency\\n"
-    "    body = f\"{amount:,.2f}\"\\n"
-    "    body = body.replace(\",\", \" \").replace(\".\", \",\")\\n"
-    "    return f\"{body} {symbol}\"\\n"
+    'printf \'def format_price(amount, currency="RUB"):\\n'
+    '    symbol = "₽" if currency == "RUB" else currency\\n'
+    '    body = f"{amount:,.2f}"\\n'
+    '    body = body.replace(",", " ").replace(".", ",")\\n'
+    '    return f"{body} {symbol}"\\n'
     "' > prices.py"
 )
 
@@ -367,7 +368,12 @@ def _s5_tester_script(messages: list[dict]) -> dict:
 # enough requests for the INFLATED usage (see _usage_for) to cross the
 # compaction threshold mid-run.
 S3_READ_ORDER = [
-    "alpha", "beta", "gamma", "delta", "epsilon", "zeta",
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "zeta",
 ]
 S3_FIX_KAPPA = (
     "python3 -c \"import pathlib; p=pathlib.Path('glossary/kappa.py'); "
@@ -383,10 +389,8 @@ def _read_paths(messages: list[dict]) -> list[str]:
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function") or {}
             if fn.get("name") == "read_file":
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     out.append(str((json.loads(fn.get("arguments") or "{}")).get("path")))
-                except json.JSONDecodeError:
-                    pass
     return out
 
 
@@ -396,9 +400,7 @@ def _s3_coder_script(messages: list[dict]) -> dict:
     lambda.WEIGHT via run_bash and end the turn."""
     if _called(messages, "run_bash"):
         return _bash_end_run("WEIGHT термина kappa изменён на 42, тесты зелёные.")
-    prompt_all = "\n".join(
-        str(m.get("content") or "") for m in messages if m.get("role") == "user"
-    )
+    prompt_all = "\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "user")
     # After the mid-run compaction the read history is summarized away —
     # the continuation turn goes straight to the fix.
     if "[context summary]" in prompt_all:
@@ -414,9 +416,7 @@ def _s3_coder_script(messages: list[dict]) -> dict:
 
 # report.py with the correct separator (the S4 coder's one-shot fix).
 S4_FIX_REPORT = (
-    "printf 'def format_report(items):\\n"
-    "    return \"\\\\n\\\\n\".join(items)\\n"
-    "' > report.py"
+    "printf 'def format_report(items):\\n    return \"\\\\n\\\\n\".join(items)\\n' > report.py"
 )
 # The tester reads the 25k-line listing in chunks (each run_bash result is
 # capped at 10 KiB by drcode); the INFLATED usage crosses the threshold
@@ -452,9 +452,7 @@ def _s4_tester_script(messages: list[dict]) -> dict:
     straight to the verdict."""
     if _called(messages, "set_verification"):
         return _bash_end_run("Листинг проверен полностью, задача verified.")
-    prompt_all = "\n".join(
-        str(m.get("content") or "") for m in messages if m.get("role") == "user"
-    )
+    prompt_all = "\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "user")
     if "[context summary]" in prompt_all:
         return _call("set_verification", {"success": True}, "call_verdict")
     n = _bash_calls(messages)
@@ -468,7 +466,7 @@ def _s4_tester_script(messages: list[dict]) -> dict:
 # formatter.py with the correct bullet prefix (the S7 coder's fix).
 S7_FIX = (
     "printf 'def bullet_list(items):\n"
-    "    return \"\\\\n\".join(\"- \" + item for item in items)\n"
+    '    return "\\\\n".join("- " + item for item in items)\n'
     "' > formatter.py"
 )
 S7_READS = ["formatter.py", "test_formatter.py"]
@@ -489,9 +487,7 @@ def _s7_coder_script(messages: list[dict]) -> dict:
     reads = _read_paths(messages)
     for name in S7_READS:
         if name not in reads:
-            return _call(
-                "read_file", {"path": name}, f"call_read_{name.replace('.', '_')}"
-            )
+            return _call("read_file", {"path": name}, f"call_read_{name.replace('.', '_')}")
     return _run_bash(S7_FIX, "call_fix")
 
 
@@ -549,14 +545,23 @@ def _chat_stream(body: dict) -> bytes:
     messages = body.get("messages", [])
     script = SCRIPTS.get(model, _coder_script)(messages)
     out = b""
-    first = {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 0, "model": model}
+    first = {
+        "id": "chatcmpl-fixture",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": model,
+    }
     if "text" in script:
-        out += _sse(first | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]})
+        out += _sse(
+            first | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]}
+        )
         out += _sse(first | {"choices": [{"index": 0, "delta": {"content": script["text"]}}]})
         out += _sse(first | {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
     else:
         call = script["tool_calls"][0]
-        out += _sse(first | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]})
+        out += _sse(
+            first | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]}
+        )
         out += _sse(
             first
             | {
@@ -583,7 +588,16 @@ def _chat_stream(body: dict) -> bytes:
         out += _sse(first | {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
     # The usage chunk OpenAI appends when stream_options.include_usage —
     # the final usage the recorder logs for this request.
-    out += _sse({"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": _usage_for(model, messages)})
+    out += _sse(
+        {
+            "id": "chatcmpl-fixture",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": model,
+            "choices": [],
+            "usage": _usage_for(model, messages),
+        }
+    )
     out += b"data: [DONE]\n\n"
     return out
 
@@ -630,7 +644,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             headers[name.strip().lower()] = value.strip()
         length = int(headers.get("content-length", "0"))
         body_raw = await reader.readexactly(length) if length else b""
-        method, _, path = request_line.decode().partition(" ")
+        _method, _, path = request_line.decode().partition(" ")
         path = path.split(" ")[0] if " " in path else path
 
         if path.endswith("/models") or path.endswith("/running"):
@@ -650,12 +664,10 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
         else:
             payload = b'{"error": "not found"}'
-            head = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nConnection: close\r\n"
-        writer.write(
-            head
-            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
-            + payload
-        )
+            head = (
+                b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            )
+        writer.write(head + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
         await writer.drain()
     except (asyncio.IncompleteReadError, ConnectionError):
         pass  # a client hangup mid-probe is not a gateway error
@@ -681,7 +693,5 @@ async def serve(port: int) -> None:
 
 
 if __name__ == "__main__":
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(serve(int(sys.argv[1]) if len(sys.argv) > 1 else 8917))
-    except KeyboardInterrupt:
-        pass

@@ -22,10 +22,19 @@ uv run bench run --scenario all --matrix matrix.toml --parallel 2 --repeats 3
 uv run bench run --scenario s6_queue_priority --combo strong-coder/cheap-tester --repeats 1
 python -m bench.run_one <scenario> <combo> <run_dir>     # single run (no matrix sweep)
 uv run bench report runs/ [--html]                       # → runs/report.md
+uv run ruff check . && uv run ruff format --check .      # lint + format gate
+uv run pyright                                           # type gate
 python tests/fake_gateway.py [port]                      # local scripted OpenAI-compatible gateway
 ```
 
-No lint/typecheck/CI/pre-commit exists in this repo (unlike the drcode submodule, which gates on ruff + pyright) — pytest is the only automated gate.
+No CI/pre-commit exists in this repo, but the repo gates on **ruff + pyright + pytest** (same tooling as the drcode submodule):
+
+```bash
+uv run ruff check . && uv run ruff format --check .   # lint + format
+uv run pyright                                        # types (basic mode)
+```
+
+Ruff/pyright are scoped to `bench/` + `tests/` — the `drcode/` submodule is excluded (it has its own gate; never lint or fix it from this repo). Cyrillic in briefs/docstrings is intentional, hence `RUF001`–`RUF003` are ignored.
 
 ## How a run works (non-obvious invariants)
 

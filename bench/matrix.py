@@ -111,9 +111,7 @@ def parse_ref(ref: str, context: str) -> tuple[str, str]:
     return provider, model
 
 
-def _parse_max_context_overrides(
-    raw: dict, *, combo_name: str
-) -> tuple[tuple[str, int], ...]:
+def _parse_max_context_overrides(raw: dict, *, combo_name: str) -> tuple[tuple[str, int], ...]:
     """Per-role `max_context_tokens` overrides of a combo entry: flat TOML
     keys `<role>_max_context_tokens` (§1.2: the small context goes to the
     CODING model — even in the tester-compaction scenario S4, §13)."""
@@ -124,16 +122,12 @@ def _parse_max_context_overrides(
             continue
         value = int(value)
         if value <= 0:
-            raise MatrixError(
-                f"combo '{combo_name}': {role}_max_context_tokens must be > 0"
-            )
+            raise MatrixError(f"combo '{combo_name}': {role}_max_context_tokens must be > 0")
         out.append((role, value))
     return tuple(out)
 
 
-def effective_max_context(
-    combo: Combo, providers: dict[str, ProviderSpec], role: str
-) -> int:
+def effective_max_context(combo: Combo, providers: dict[str, ProviderSpec], role: str) -> int:
     """The max_context_tokens the role will actually run with: the combo's
     override when set, otherwise the catalog value of the referenced model."""
     override = combo.max_context_override(role)
@@ -180,7 +174,9 @@ def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
             coding=str(raw["coding"]),
             tester=str(raw["tester"]),
             compaction=str(raw["compaction"]),
-            max_context_overrides=_parse_max_context_overrides(raw, combo_name=str(raw.get("name", f"combo-{i}"))),
+            max_context_overrides=_parse_max_context_overrides(
+                raw, combo_name=str(raw.get("name", f"combo-{i}"))
+            ),
         )
         # Every referenced model must exist in the matrix.
         for role, ref in combo.roles().items():

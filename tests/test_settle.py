@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
-from drcode.models import Task, TaskStatus, VerificationStatus
-
 from bench.scenario import Scenario
 from bench.settle import SettleError, dump_diagnostics, settle_blocker, wait_settle
+from drcode.models import Task, TaskStatus, VerificationStatus
 
 
 def make_scenario(**settle) -> Scenario:
@@ -80,7 +80,8 @@ def test_queued_task_blocks() -> None:
     task = completed(VerificationStatus.PASSED)
     queued = Task(title="q")
     app = make_app(task, queued)
-    assert "queue not empty" in settle_blocker(app, make_scenario(), [task])
+    blocker = settle_blocker(app, make_scenario(), [task])
+    assert blocker is not None and "queue not empty" in blocker
 
 
 def test_uncompleted_target_blocks() -> None:
@@ -113,8 +114,12 @@ async def test_wait_settle_success_polls_pilot() -> None:
 
     asyncio.get_running_loop().create_task(finish_soon())
     result = await wait_settle(
-        app, make_scenario(verification="passed"), pilot, timeout=5.0,
-        targets=[task], poll_seconds=0.01,
+        app,
+        make_scenario(verification="passed"),
+        pilot,
+        timeout=5.0,
+        targets=[task],
+        poll_seconds=0.01,
     )
     assert result.ok and not result.timed_out
     assert pilot.pauses > 0
@@ -138,8 +143,12 @@ async def test_wait_settle_extra_blocker_hard_failure() -> None:
     task = completed(VerificationStatus.PASSED)
     app = make_app(task)
     result = await wait_settle(
-        app, make_scenario(verification="passed"), FakePilot(), timeout=5.0,
-        targets=[task], poll_seconds=0.01,
+        app,
+        make_scenario(verification="passed"),
+        FakePilot(),
+        timeout=5.0,
+        targets=[task],
+        poll_seconds=0.01,
         extra_blocker=lambda: "no answer for the clarifying question",
     )
     assert not result.ok and not result.timed_out
@@ -150,8 +159,13 @@ async def test_wait_settle_extra_blocker_none_is_no_objection() -> None:
     task = completed(VerificationStatus.PASSED)
     app = make_app(task)
     result = await wait_settle(
-        app, make_scenario(verification="passed"), FakePilot(), timeout=5.0,
-        targets=[task], poll_seconds=0.01, extra_blocker=lambda: None,
+        app,
+        make_scenario(verification="passed"),
+        FakePilot(),
+        timeout=5.0,
+        targets=[task],
+        poll_seconds=0.01,
+        extra_blocker=lambda: None,
     )
     assert result.ok and not result.timed_out
 
@@ -170,7 +184,7 @@ async def test_wait_settle_broken_app_is_error() -> None:
 
 
 def test_dump_diagnostics_full(tmp_path: Path) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     state = tmp_path / "workspace" / ".drcode" / "tasks"
     state.mkdir(parents=True)
@@ -185,8 +199,7 @@ def test_dump_diagnostics_full(tmp_path: Path) -> None:
                 "unfinished": True,
                 "clarification": {"question": "что именно?"},
                 "events": [
-                    {"at": datetime.now(timezone.utc).isoformat(), "text": f"e{i}"}
-                    for i in range(50)
+                    {"at": datetime.now(UTC).isoformat(), "text": f"e{i}"} for i in range(50)
                 ],
                 "tester_messages": [[], []],
                 "messages": [1, 2, 3],
@@ -195,7 +208,7 @@ def test_dump_diagnostics_full(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (tmp_path / "model_log.jsonl").write_text(
-        "\n".join(f"{{\"i\": {i}}}" for i in range(500)) + "\n", encoding="utf-8"
+        "\n".join(f'{{"i": {i}}}' for i in range(500)) + "\n", encoding="utf-8"
     )
 
     diag = dump_diagnostics(tmp_path)

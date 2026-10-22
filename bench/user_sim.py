@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +104,7 @@ class UserSimulator:
                 self._tick()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # noqa: BLE001 - the sim must not kill the run
+            except Exception as e:
                 self._log("error", detail={"error": f"{type(e).__name__}: {e}"})
             await asyncio.sleep(self.poll_seconds)
 
@@ -125,10 +125,7 @@ class UserSimulator:
 
     def _answer_clarifications(self, tasks: list[Task]) -> None:
         for task in tasks:
-            if (
-                task.status is not TaskStatus.AWAITING_CLARIFICATION
-                or task.clarification is None
-            ):
+            if task.status is not TaskStatus.AWAITING_CLARIFICATION or task.clarification is None:
                 continue
             question = task.clarification.question
             answer = self._find_answer(question)
@@ -151,9 +148,7 @@ class UserSimulator:
         answers they are consumed in declaration order. Matched answers
         that do NOT fit the question are never guessed with."""
         answers = self.scenario.clarification_answers
-        matched = [
-            a for a in answers if a.match and a.match.lower() in question.lower()
-        ]
+        matched = [a for a in answers if a.match and a.match.lower() in question.lower()]
         if matched:
             return matched[0].answer
         pool = [a for a in answers if not a.match]
@@ -174,10 +169,15 @@ class UserSimulator:
                 if not self._followup_due(followup, task):
                     continue
                 self._fired_followups.add(key)
-                self._send(task, followup.text, action="followup", detail={
-                    "when": followup.when,
-                    "followup_index": idx,
-                })
+                self._send(
+                    task,
+                    followup.text,
+                    action="followup",
+                    detail={
+                        "when": followup.when,
+                        "followup_index": idx,
+                    },
+                )
 
     def _resolve_followup_tasks(self, followup: Any) -> list[Task]:
         selector = (followup.task or "last").strip()
@@ -201,9 +201,7 @@ class UserSimulator:
             needle = when.partition(":")[2].strip().lower()
             if not needle:
                 return False
-            return any(
-                needle in str(ev.text).lower() for ev in task.events
-            )
+            return any(needle in str(ev.text).lower() for ev in task.events)
         return False  # validated away by the loader; never fire on unknown
 
     # 3. stuck protection (§6 p.3)
@@ -212,11 +210,7 @@ class UserSimulator:
         now = time.monotonic()
         agent_running = bool(getattr(self.app, "agent_running", False))
         for task in tasks:
-            stuck = (
-                task.status is TaskStatus.ACTIVE
-                and not agent_running
-                and not task.unfinished
-            )
+            stuck = task.status is TaskStatus.ACTIVE and not agent_running and not task.unfinished
             if not stuck:
                 self._stuck_since.pop(task.id, None)
                 continue
@@ -230,7 +224,9 @@ class UserSimulator:
                 self._nudged.add(task.id)
                 self._stuck_since[task.id] = now
                 self._send(
-                    task, self.nudge_text, action="stuck_nudge",
+                    task,
+                    self.nudge_text,
+                    action="stuck_nudge",
                     detail={"stuck_for_s": round(now - since, 1)},
                 )
             else:
@@ -266,9 +262,7 @@ class UserSimulator:
         (`run_agent`, the TUI's was_active path); everything else goes
         through the single `_advance` gate."""
         app = self.app
-        if task.status is TaskStatus.ACTIVE and not getattr(
-            app, "agent_running", False
-        ):
+        if task.status is TaskStatus.ACTIVE and not getattr(app, "agent_running", False):
             app.call_later(app.run_agent, task.id)
         else:
             app.call_later(app._advance)
@@ -291,7 +285,7 @@ class UserSimulator:
     ) -> None:
         record: dict[str, Any] = {
             "ts": round(time.time(), 3),
-            "at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "at": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "action": action,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
@@ -309,7 +303,7 @@ async def run_user_simulator(
     targets: list[Task],
     log_path: Path,
     **kwargs: Any,
-) -> UserSimulator:
+) -> tuple[UserSimulator, asyncio.Task[None]]:
     """Convenience wrapper (§4 skeleton): create the simulator and run it
     as an asyncio task. Returns the running task's handle tuple
     (simulator, asyncio.Task)."""

@@ -14,7 +14,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from bench.runner import (
     JobOutcome,
     Runner,
@@ -120,9 +119,7 @@ def test_plan_jobs_unknown_combo_fails(bench_env) -> None:
 def test_is_infrastructure_failure_classification() -> None:
     assert is_infrastructure_failure(None)  # no verdict at all
     assert is_infrastructure_failure({"ok": False, "reason": "pre-flight failed: x"})
-    assert is_infrastructure_failure(
-        {"ok": False, "reason": "DrCodeApp failed to start: boom"}
-    )
+    assert is_infrastructure_failure({"ok": False, "reason": "DrCodeApp failed to start: boom"})
     assert is_infrastructure_failure(
         {"ok": False, "reason": "drcode config is not ready (no model resolvable)"}
     )
@@ -167,9 +164,7 @@ def install_fake(monkeypatch, scripts, timeout_flag: list[str] | None = None):
     return calls
 
 
-def test_runner_retries_infra_failure_then_succeeds(
-    bench_env, tmp_path, monkeypatch
-) -> None:
+def test_runner_retries_infra_failure_then_succeeds(bench_env, tmp_path, monkeypatch) -> None:
     matrix, scenarios = bench_env
     ok = {"ok": True, "reason": "settled", "checks_ok": True}
     scripts = {
@@ -207,9 +202,7 @@ def test_runner_retries_infra_failure_then_succeeds(
         assert (call["run_dir"] / "stdout.log").read_text() == "out"
         assert (call["run_dir"] / "stderr.log").read_text() == "err"
 
-    summary = json.loads(
-        (tmp_path / "runs" / "runner-summary.json").read_text(encoding="utf-8")
-    )
+    summary = json.loads((tmp_path / "runs" / "runner-summary.json").read_text(encoding="utf-8"))
     assert summary["totals"]["jobs"] == 4
     assert summary["totals"]["ok"] == 3
     assert summary["totals"]["content_failures"] == 1
@@ -223,9 +216,7 @@ def test_runner_infra_exhausted_is_unresolved(bench_env, tmp_path, monkeypatch) 
         ("s1_x", "combo-a", 0): [(2, None), (2, None), (2, None)],
     }
     install_fake(monkeypatch, scripts)
-    runner = Runner(
-        matrix, tmp_path / "runs", parallel=1, max_infra_retries=2, verbose=False
-    )
+    runner = Runner(matrix, tmp_path / "runs", parallel=1, max_infra_retries=2, verbose=False)
     jobs, _, _ = plan_jobs(matrix, scenarios, "s1_x", "combo-a", repeats=1)
     outcomes = runner.run(jobs)
     (outcome,) = outcomes
@@ -310,8 +301,15 @@ def test_cli_run_invokes_sweep_and_report(tmp_path, monkeypatch, capsys) -> None
     monkeypatch.setattr(runner_mod, "run_sweep", fake_sweep)
     rc = cli.main(
         [
-            "run", "--scenario", "s6_queue_priority", "--repeats", "2",
-            "--parallel", "2", "--runs-dir", str(tmp_path / "runs"),
+            "run",
+            "--scenario",
+            "s6_queue_priority",
+            "--repeats",
+            "2",
+            "--parallel",
+            "2",
+            "--runs-dir",
+            str(tmp_path / "runs"),
         ]
     )
     assert rc == 0
@@ -328,10 +326,15 @@ def test_cli_run_unresolved_infra_exit_code(tmp_path, monkeypatch) -> None:
 
     def fake_sweep(*args, **kwargs):
         return (
-            [JobOutcome(
-                scenario="s1_happy", combo="c", repeat=0, ok=None,
-                reason="infrastructure failure after 3 attempts: x",
-            )],
+            [
+                JobOutcome(
+                    scenario="s1_happy",
+                    combo="c",
+                    repeat=0,
+                    ok=None,
+                    reason="infrastructure failure after 3 attempts: x",
+                )
+            ],
             None,
         )
 

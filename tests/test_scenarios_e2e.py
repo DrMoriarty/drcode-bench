@@ -113,9 +113,7 @@ def env_guard():
 
 def read_jsonl(path: Path) -> list[dict]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -355,9 +353,7 @@ async def test_s7_fault_injection_end_to_end(tmp_path: Path, monkeypatch, env_gu
     # rest were forwarded and answered 200.
     forwarded = [e for e in proxy_entries if not e.get("fault")]
     assert forwarded and all(e["status"] == 200 for e in forwarded)
-    assert all(
-        e["status"] in (429, 200) for e in proxy_entries if e.get("fault")
-    )
+    assert all(e["status"] in (429, 200) for e in proxy_entries if e.get("fault"))
     # Every proxied request carries a latency measurement (§9: exact
     # timings are the proxy's second job).
     assert all(isinstance(e["latency_ms"], int) for e in proxy_entries)
@@ -377,9 +373,7 @@ async def test_s7_fault_injection_end_to_end(tmp_path: Path, monkeypatch, env_gu
     assert len(retry_events) == 3, retry_events
     # One ModelHTTPError (the surfaced 429) + two connection drops.
     assert any("ModelHTTPError" in e or "RateLimit" in e for e in retry_events)
-    assert retry_events.count(
-        next(e for e in retry_events if "ModelConnectionError" in e)
-    ) == 2
+    assert retry_events.count(next(e for e in retry_events if "ModelConnectionError" in e)) == 2
     # unfinished-resume: the brief was consumed exactly once — the retry
     # resumed the attempt instead of re-sending the prompt.
     prompts = [
@@ -429,8 +423,9 @@ async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard)
         combo = "s1-proxy-roles"
         matrix_path = tmp_path / "matrix.toml"
         matrix_path.write_text(
-            MATRIX_TEMPLATE.format(port=port, combo=combo,
-                                   coder="fake-coder", tester="fake-tester"),
+            MATRIX_TEMPLATE.format(
+                port=port, combo=combo, coder="fake-coder", tester="fake-tester"
+            ),
             encoding="utf-8",
         )
 
@@ -448,9 +443,7 @@ async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard)
         scenario = load_scenario_by_id(REPO / "scenarios", "s1_happy")
         assert scenario.proxy is None  # no [proxy] section — forced by the flag
         scenario = dataclasses.replace(scenario, timeout_min=3)
-        report = await run_benchmark(
-            scenario, combo, run_dir, matrix_path, use_proxy=True
-        )
+        report = await run_benchmark(scenario, combo, run_dir, matrix_path, use_proxy=True)
     finally:
         server.close()
         await server.wait_closed()

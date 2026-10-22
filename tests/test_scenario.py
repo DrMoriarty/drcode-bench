@@ -6,7 +6,6 @@ import textwrap
 from pathlib import Path
 
 import pytest
-
 from bench.scenario import (
     Scenario,
     ScenarioError,

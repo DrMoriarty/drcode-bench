@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -53,6 +54,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .env_setup import EnvSetupError, prepare_run, subprocess_env
 from .matrix import MatrixError, get_combo, load_matrix
@@ -95,7 +97,7 @@ class RunReport:
     proxy_log: str | None = None
     proxy_base: str | None = None
     proxy_faults: dict[str, int] = field(default_factory=dict)
-    tasks: list[dict[str, object]] = field(default_factory=list)
+    tasks: list[dict[str, Any]] = field(default_factory=list)
     # User simulator (§6): how many interventions it made and which
     # scenario failures it recorded (report §10 must be able to tell
     # "the model is dumb" from "the simulator intervened").
@@ -206,13 +208,8 @@ async def run_benchmark(
         from .proxy import FaultProxy, ProxyError, upstreams_for_providers
 
         providers, _ = load_matrix(matrix_path)
-        used = {
-            combo.ref(role).partition("/")[0]
-            for role in ("coding", "tester", "compaction")
-        }
-        upstreams = upstreams_for_providers(
-            {name: providers[name] for name in sorted(used)}
-        )
+        used = {combo.ref(role).partition("/")[0] for role in ("coding", "tester", "compaction")}
+        upstreams = upstreams_for_providers({name: providers[name] for name in sorted(used)})
         proxy = FaultProxy(
             upstreams,
             proxy_spec.faults if proxy_spec else (),
@@ -231,9 +228,7 @@ async def run_benchmark(
 
     # 1..7 — the run itself, with the proxy (if any) stopped in ALL exits.
     try:
-        return await _run_with_optional_proxy(
-            scenario, combo, run_dir, matrix_path, report
-        )
+        return await _run_with_optional_proxy(scenario, combo, run_dir, matrix_path, report)
     finally:
         if proxy is not None:
             await proxy.stop()
@@ -306,7 +301,7 @@ async def _run_with_optional_proxy(
 
     try:
         app = DrCodeApp(paths.workspace)
-    except Exception as e:  # noqa: BLE001 - a broken app is a failed run
+    except Exception as e:
         report.reason = f"DrCodeApp failed to start: {type(e).__name__}: {e}"
         report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         dump_diagnostics(run_dir)
@@ -334,9 +329,7 @@ async def _run_with_optional_proxy(
             #    task, so viewed_id stays None and no transcript is ever
             #    rendered into the measurements (§4/§13).
             for brief in scenario.briefs:
-                targets.append(
-                    app.manager.create(brief.title, brief.text, kind=brief.task_kind())
-                )
+                targets.append(app.manager.create(brief.title, brief.text, kind=brief.task_kind()))
             _kick_pipeline(app)
             await pilot.pause()
 
@@ -346,9 +339,7 @@ async def _run_with_optional_proxy(
             #    appended to <run_dir>/user_sim.jsonl.
             from .user_sim import UserSimulator
 
-            sim = UserSimulator(
-                app, scenario, targets, run_dir / "user_sim.jsonl"
-            )
+            sim = UserSimulator(app, scenario, targets, run_dir / "user_sim.jsonl")
             sim_task = asyncio.create_task(sim.run(), name="bench-user-sim")
             try:
                 # 6. Settle detection (§4). The simulator's scenario
@@ -371,13 +362,11 @@ async def _run_with_optional_proxy(
                 # §4 skeleton: the simulator is cancelled right after
                 # settle (or if the settle wait itself crashed).
                 sim_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await sim_task
-                except asyncio.CancelledError:
-                    pass
                 report.user_sim_actions = sim.actions
                 report.user_sim_failures = list(sim.failures)
-    except Exception as e:  # noqa: BLE001 - any crash is a failed run
+    except Exception as e:
         report.reason = f"app crashed: {type(e).__name__}: {e}"
 
     report.tasks = _task_summaries(app.manager)
@@ -388,13 +377,9 @@ async def _run_with_optional_proxy(
     if sim is not None and sim.failures and settled_ok:
         # The simulator recorded scenario failures (§6) even though the
         # pipeline reached a quiet state: the run is still a failure.
-        report.reason = (
-            f"settled but the user simulator failed: {'; '.join(sim.failures)}"
-        )
+        report.reason = f"settled but the user simulator failed: {'; '.join(sim.failures)}"
 
-    report.ok = (
-        settled_ok and report.checks_ok is not False and not (sim and sim.failures)
-    )
+    report.ok = settled_ok and report.checks_ok is not False and not (sim and sim.failures)
     report.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
     if not report.ok:
@@ -408,7 +393,7 @@ async def _run_with_optional_proxy(
         from .metrics import extract_run_metrics
 
         extract_run_metrics(run_dir)
-    except Exception as e:  # noqa: BLE001 - metrics are auxiliary
+    except Exception as e:
         print(f"warning: metrics extraction failed: {e}", file=sys.stderr)
 
     return report
@@ -447,9 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.run_dir)
     try:
         report = asyncio.run(
-            run_benchmark(
-                scenario, args.combo, run_dir, matrix_path, use_proxy=args.use_proxy
-            )
+            run_benchmark(scenario, args.combo, run_dir, matrix_path, use_proxy=args.use_proxy)
         )
     except (EnvSetupError, RunError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -461,9 +444,7 @@ def main(argv: list[str] | None = None) -> int:
         faults = ", ".join(f"{k}×{v}" for k, v in report.proxy_faults.items())
         print(f"proxy:    {report.proxy_base} (faults: {faults or 'none'})")
     if report.resolved_context_tokens:
-        ctx = ", ".join(
-            f"{role}={n}" for role, n in sorted(report.resolved_context_tokens.items())
-        )
+        ctx = ", ".join(f"{role}={n}" for role, n in sorted(report.resolved_context_tokens.items()))
         print(f"context:  max_context_tokens per role: {ctx}")
     print(f"result:   {'OK' if report.ok else 'FAILED'} — {report.reason}")
     for t in report.tasks:
@@ -474,10 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     if report.checks_ok is not None:
         print(f"checks.py: {'green' if report.checks_ok else 'RED'}")
     if report.user_sim_actions or report.user_sim_failures:
-        print(
-            f"user sim: {report.user_sim_actions} intervention(s) "
-            f"({run_dir / 'user_sim.jsonl'})"
-        )
+        print(f"user sim: {report.user_sim_actions} intervention(s) ({run_dir / 'user_sim.jsonl'})")
         for failure in report.user_sim_failures:
             print(f"  sim failure: {failure}")
     if not report.ok:

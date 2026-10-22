@@ -44,7 +44,7 @@ class SettleResult:
     timed_out: bool
 
 
-def settle_blocker(app: Any, scenario: "Scenario", targets: list[Any]) -> str | None:
+def settle_blocker(app: Any, scenario: Scenario, targets: list[Any]) -> str | None:
     """One evaluation of the settle criterion: None = settled, otherwise
     the current reason it is not.
 
@@ -74,7 +74,7 @@ def settle_blocker(app: Any, scenario: "Scenario", targets: list[Any]) -> str | 
 
 async def wait_settle(
     app: Any,
-    scenario: "Scenario",
+    scenario: Scenario,
     pilot: Any,
     timeout: float,
     *,
@@ -113,11 +113,13 @@ async def wait_settle(
                 )
         try:
             reason = settle_blocker(app, scenario, targets)
-        except Exception as e:  # noqa: BLE001 - a broken check is a run failure
+        except Exception as e:
             raise SettleError(f"settle check crashed: {type(e).__name__}: {e}") from e
         if reason is None:
             return SettleResult(
-                ok=True, reason="settled", elapsed_s=time.monotonic() - start,
+                ok=True,
+                reason="settled",
+                elapsed_s=time.monotonic() - start,
                 timed_out=False,
             )
         if time.monotonic() >= deadline:
@@ -184,8 +186,7 @@ def dump_diagnostics(run_dir: Path) -> Path:
                     "clarification": raw.get("clarification"),
                     "n_events": len(events),
                     "last_events": [
-                        {"at": e.get("at"), "text": e.get("text")}
-                        for e in events[-EVENT_TAIL:]
+                        {"at": e.get("at"), "text": e.get("text")} for e in events[-EVENT_TAIL:]
                     ],
                     "n_testing_rounds": len(raw.get("tester_messages") or []),
                     "n_messages": len(raw.get("messages") or []),
@@ -213,7 +214,5 @@ def dump_diagnostics(run_dir: Path) -> Path:
         }
 
     out = diag / "diagnostics.json"
-    out.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return diag

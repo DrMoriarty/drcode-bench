@@ -9,14 +9,14 @@ user_sim.jsonl.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 
-from drcode.models import Task, TaskEvent, TaskKind, TaskStatus, VerificationStatus
-from drcode.task_manager import TaskManager
-
 from bench.scenario import ClarificationAnswer, Followup, Scenario
 from bench.user_sim import UserSimulator
+from drcode.models import TaskEvent, TaskKind, TaskStatus, VerificationStatus
+from drcode.task_manager import TaskManager
 
 
 class FakeApp:
@@ -65,10 +65,8 @@ async def run_until(sim: UserSimulator, pred, timeout: float = 2.0) -> None:
                 await asyncio.sleep(0.01)
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def test_clarification_answered_by_match(tmp_path: Path) -> None:
@@ -145,7 +143,8 @@ async def test_clarification_without_answer_fails_scenario(tmp_path: Path) -> No
 
     await run_until(sim, lambda: sim.failures)
 
-    assert sim.failure_reason() and "clarification" in sim.failure_reason()
+    reason = sim.failure_reason()
+    assert reason and "clarification" in reason
     # §6: not answered → the task must stay untouched, still awaiting.
     assert task.status is TaskStatus.AWAITING_CLARIFICATION
     assert not task.pending_input
@@ -249,9 +248,7 @@ async def test_stuck_active_task_is_nudged_then_fails(tmp_path: Path) -> None:
 
     scenario = make_scenario()
     log_path = tmp_path / "sim.jsonl"
-    sim = UserSimulator(
-        app, scenario, [task], log_path, poll_seconds=0.01, stuck_after_s=0.05
-    )
+    sim = UserSimulator(app, scenario, [task], log_path, poll_seconds=0.01, stuck_after_s=0.05)
 
     await run_until(sim, lambda: sim.failures, timeout=5.0)
 
@@ -259,7 +256,8 @@ async def test_stuck_active_task_is_nudged_then_fails(tmp_path: Path) -> None:
     assert [e.text for e in task.pending_input] == [sim.nudge_text]
     assert ("run_agent", (task.id,)) in app.kicks
     # ...then, with nothing still running, a scenario failure.
-    assert sim.failure_reason() and "ACTIVE" in sim.failure_reason()
+    reason = sim.failure_reason()
+    assert reason and "ACTIVE" in reason
     records = read_log(log_path)
     actions = [r["action"] for r in records]
     assert "stuck_nudge" in actions
@@ -277,8 +275,12 @@ async def test_active_task_with_running_agent_is_not_stuck(tmp_path: Path) -> No
     manager.storage.save(task)
 
     sim = UserSimulator(
-        app, make_scenario(), [task], tmp_path / "sim.jsonl",
-        poll_seconds=0.01, stuck_after_s=0.05,
+        app,
+        make_scenario(),
+        [task],
+        tmp_path / "sim.jsonl",
+        poll_seconds=0.01,
+        stuck_after_s=0.05,
     )
     await asyncio.sleep(0.2)
     assert sim.actions == 0
@@ -300,8 +302,12 @@ async def test_hold_and_unfinished_are_untouched(tmp_path: Path) -> None:
     manager.storage.save(paused)
 
     sim = UserSimulator(
-        app, make_scenario(), [held, paused], tmp_path / "sim.jsonl",
-        poll_seconds=0.01, stuck_after_s=0.05,
+        app,
+        make_scenario(),
+        [held, paused],
+        tmp_path / "sim.jsonl",
+        poll_seconds=0.01,
+        stuck_after_s=0.05,
     )
     await asyncio.sleep(0.2)
     assert sim.actions == 0 and not sim.failures
@@ -334,8 +340,10 @@ def test_extract_run_metrics_includes_user_sim(tmp_path: Path) -> None:
         json.dumps({"scenario": "s5", "combo": "c", "ok": True}), encoding="utf-8"
     )
     (run_dir / "user_sim.jsonl").write_text(
-        json.dumps({"action": "clarification_answer", "task_id": "a"}) + "\n"
-        + json.dumps({"action": "followup", "task_id": "a"}) + "\n",
+        json.dumps({"action": "clarification_answer", "task_id": "a"})
+        + "\n"
+        + json.dumps({"action": "followup", "task_id": "a"})
+        + "\n",
         encoding="utf-8",
     )
     metrics = extract_run_metrics(run_dir)

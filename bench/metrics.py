@@ -45,10 +45,9 @@ from __future__ import annotations
 
 import json
 import re
-import statistics
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,9 +68,7 @@ _FILL_RE = re.compile(r"^Context fill (\d+)% — (.+)$")
 # Compaction failure (coder and tester alike): "compaction failed: Type: msg"
 _COMPACTION_FAILED_RE = re.compile(r"^compaction failed:")
 # "Network error (Type): retry 1/4 in 2 s" / "...: tester retry 1/4 in 2 s"
-_NET_RETRY_RE = re.compile(
-    r"^Network error \((?P<err>[^)]*)\): (?P<who>tester )?retry (?P<n>\d+)/"
-)
+_NET_RETRY_RE = re.compile(r"^Network error \((?P<err>[^)]*)\): (?P<who>tester )?retry (?P<n>\d+)/")
 _TESTER_FAILED_RE = re.compile(r"^tester failed:")
 # "Task failed and was excluded from development for the rest of the session…"
 _EXCLUDED_RE = re.compile(r"^Task failed and was excluded")
@@ -112,8 +109,8 @@ def parse_ts(raw: Any) -> datetime | None:
     else:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def dt_or(raw: Any) -> str | None:
@@ -188,9 +185,7 @@ def user_prompt_contents(msg: dict[str, Any]) -> list[str]:
 def is_summary_message(msg: dict[str, Any]) -> bool:
     """True when the request carries the synthetic compaction-summary
     prompt (any user-prompt part — see `user_prompt_contents`)."""
-    return any(
-        c.startswith(COMPACTION_SUMMARY_PREFIX) for c in user_prompt_contents(msg)
-    )
+    return any(c.startswith(COMPACTION_SUMMARY_PREFIX) for c in user_prompt_contents(msg))
 
 
 def usage_of(msg: dict[str, Any]) -> dict[str, int] | None:
@@ -271,7 +266,7 @@ def classify_event(text: str) -> CompactionEvent | None:
     m = _FILL_RE.match(text)
     if m:
         rest = m.group(2).strip().rstrip("…").strip()
-        for needle, (phase, kind) in _FILL_KINDS.items():
+        for needle, (phase, _kind) in _FILL_KINDS.items():
             if needle in rest:
                 return CompactionEvent(None, "start", phase, int(m.group(1)), rest)
         return CompactionEvent(None, "fill_report", "unknown", int(m.group(1)), rest)
@@ -410,9 +405,7 @@ def analyze_compaction_savings(
                         "at": dt_or(summary_at),
                         "summary_chars": len(summary_body),
                         "prompts_kept": prompts_before,
-                        "pre_tokens_est": (
-                            last_usage["context_tokens"] if last_usage else None
-                        ),
+                        "pre_tokens_est": (last_usage["context_tokens"] if last_usage else None),
                         "post_tokens_est": None,
                         "saved_tokens_est": None,
                         "trigger_pct": trigger,
@@ -497,9 +490,7 @@ def read_context_limits(run_dir: Path) -> dict[str, int]:
         for p in catalog.get("providers") or []:
             providers_by_name[p.get("name")] = p.get("base_url", "")
             for m in p.get("models") or []:
-                entries[(p.get("name"), m.get("id"))] = int(
-                    m.get("max_context_tokens") or 0
-                )
+                entries[(p.get("name"), m.get("id"))] = int(m.get("max_context_tokens") or 0)
         refs = project.get("models") or {}
         limits: dict[str, int] = {}
         for role, ref in refs.items():
@@ -507,9 +498,7 @@ def read_context_limits(run_dir: Path) -> dict[str, int]:
             ctx = entries.get((provider_name, model_id))
             if ctx:
                 limits[role] = ctx
-        if "coding" not in limits and isinstance(
-            project.get("max_context_tokens"), int
-        ):
+        if "coding" not in limits and isinstance(project.get("max_context_tokens"), int):
             limits["coding"] = int(project["max_context_tokens"])
         if limits:
             return limits
@@ -619,10 +608,7 @@ def analyze_tester_threshold(
     it is reported as 'coding' (no regression possible). `raw_task` is
     the unparsed task JSON. None = no tester-phase compaction to classify."""
     events = parse_events(raw_task.get("events") or [])
-    tester_starts = [
-        e for e in events.compactions
-        if e.phase == "tester" and e.kind == "start"
-    ]
+    tester_starts = [e for e in events.compactions if e.phase == "tester" and e.kind == "start"]
     if not tester_starts:
         return None
     coding = limits.get("coding")
@@ -654,7 +640,11 @@ def analyze_tester_threshold(
             # pre-compaction responses are gone from the transcript —
             # take the context size from the recorder log (§5).
             start_at = next(
-                (e.at for e in reversed(tester_starts) if trigger is not None and e.trigger_pct == trigger),
+                (
+                    e.at
+                    for e in reversed(tester_starts)
+                    if trigger is not None and e.trigger_pct == trigger
+                ),
                 None,
             )
             tokens = _recorder_tokens_before(log_entries or [], tester_tag, start_at)
@@ -663,13 +653,9 @@ def analyze_tester_threshold(
         if moot:
             source = "coding"  # thresholds coincide — no regression possible
             classified = True
-        elif implied is not None and coding:
+        elif implied is not None and coding is not None and tester is not None:
             classified = True
-            source = (
-                "coding"
-                if abs(implied - coding) <= abs(implied - tester)
-                else "tester"
-            )
+            source = "coding" if abs(implied - coding) <= abs(implied - tester) else "tester"
         sources.add(source)
         observations.append(
             {
@@ -685,21 +671,13 @@ def analyze_tester_threshold(
         # source cannot be classified from transcripts — events only.
         for e in tester_starts:
             tokens = _recorder_tokens_before(log_entries or [], tester_tag, e.at)
-            implied = (
-                round(tokens * 100 / e.trigger_pct)
-                if tokens and e.trigger_pct
-                else None
-            )
+            implied = round(tokens * 100 / e.trigger_pct) if tokens and e.trigger_pct else None
             source = "unknown"
             if moot:
                 source, classified = "coding", True
             elif implied is not None and coding and tester and tester > coding:
                 classified = True
-                source = (
-                    "coding"
-                    if abs(implied - coding) <= abs(implied - tester)
-                    else "tester"
-                )
+                source = "coding" if abs(implied - coding) <= abs(implied - tester) else "tester"
             sources.add(source)
             observations.append(
                 {
@@ -748,13 +726,8 @@ def analyze_task(
     messages = task.get("messages") or []
     coder_fill_events = [e for e in events.compactions if e.kind == "start"]
 
-    n_summaries = sum(
-        1 for m in messages if is_summary_message(m)
-    ) + sum(
-        1
-        for rnd in task.get("tester_messages") or []
-        for m in rnd
-        if is_summary_message(m)
+    n_summaries = sum(1 for m in messages if is_summary_message(m)) + sum(
+        1 for rnd in task.get("tester_messages") or [] for m in rnd if is_summary_message(m)
     )
     tester_threshold = analyze_tester_threshold(
         task,
@@ -776,13 +749,9 @@ def analyze_task(
         "n_succeeded": sum(1 for e in events.compactions if e.kind == "succeeded"),
         "n_failed": len(events.compaction_failed),
         "by_phase": {
-            "coder": sum(
-                1 for e in events.compactions if e.phase == "coder" and e.kind == "start"
-            ),
+            "coder": sum(1 for e in events.compactions if e.phase == "coder" and e.kind == "start"),
             "tester": sum(
-                1
-                for e in events.compactions
-                if e.phase == "tester" and e.kind == "start"
+                1 for e in events.compactions if e.phase == "tester" and e.kind == "start"
             ),
         },
         # Degradation signal (§10): a summary did not stick — the context
@@ -795,12 +764,10 @@ def analyze_task(
         # summary → continuation turn; turn_boundary = the between-turns
         # gate. S3's checks assert at least one of them happened.
         "mid_run_pause": any(
-            e.kind == "start" and "pausing the run" in e.detail
-            for e in events.compactions
+            e.kind == "start" and "pausing the run" in e.detail for e in events.compactions
         ),
         "turn_boundary_pause": any(
-            e.kind == "start" and "pausing the agent" in e.detail
-            for e in events.compactions
+            e.kind == "start" and "pausing the agent" in e.detail for e in events.compactions
         ),
         "tester_threshold": tester_threshold,
         "events": [e.as_dict() for e in events.compactions],
@@ -827,9 +794,7 @@ def analyze_task(
         "transcript": {
             "n_messages": len(messages),
             "n_user_prompts": n_prompts,
-            "context_tokens_final": (
-                final_usage["context_tokens"] if final_usage else None
-            ),
+            "context_tokens_final": (final_usage["context_tokens"] if final_usage else None),
         },
         "usage": usage_total(messages),
         "testing": analyze_testing(task),
@@ -928,7 +893,7 @@ def analyze_gate(
                 continue
             rec_t = rec.get("ts")
             rec_dt = (
-                datetime.fromtimestamp(rec_t, tz=timezone.utc)
+                datetime.fromtimestamp(rec_t, tz=UTC)
                 if isinstance(rec_t, (int, float))
                 else parse_ts(rec_t)
             )
@@ -958,12 +923,10 @@ def analyze_gate(
                     continue  # compaction traffic (§1.5) has no phase of its own
                 tag = str(rec.get("role") or "")
                 ts, latency = rec.get("ts"), rec.get("latency_ms")
-                if not isinstance(ts, (int, float)) or not isinstance(
-                    latency, (int, float)
-                ):
+                if not isinstance(ts, (int, float)) or not isinstance(latency, (int, float)):
                     continue
-                end = datetime.fromtimestamp(ts, tz=timezone.utc)
-                iv = (datetime.fromtimestamp(ts - latency / 1000.0, tz=timezone.utc), end)
+                end = datetime.fromtimestamp(ts, tz=UTC)
+                iv = (datetime.fromtimestamp(ts - latency / 1000.0, tz=UTC), end)
                 if tag in coder_tags:
                     coder_iv.append((tag, iv))
                 elif tag in tester_tags:
@@ -996,9 +959,7 @@ def analyze_gate(
         verdict = "unknown"
     return {
         "verdict": verdict,
-        "sources": (
-            ["transcripts", "recorder"] if recorder_checked else ["transcripts"]
-        ),
+        "sources": (["transcripts", "recorder"] if recorder_checked else ["transcripts"]),
         "n_tester_rounds": len(tester_rounds),
         "n_coder_messages": len(coder_points),
         "overlaps": overlaps,
@@ -1060,7 +1021,9 @@ def read_model_log_entries(run_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _load_model_log(run_dir: Path, entries: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+def _load_model_log(
+    run_dir: Path, entries: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
     """Aggregate `model_log.jsonl` (recorder §5) when present: per-role
     request counts (one HTTP request = one line), latency (per-role and
     overall p50/p95, §10) and tokens per role. Missing file → None (a
@@ -1151,9 +1114,7 @@ def analyze_proxy(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     errors = 0
     for rec in entries:
         model = str(rec.get("model") or "unknown")
-        entry = per_model.setdefault(
-            model, {"requests": 0, "faulted": 0, "latencies_ms": []}
-        )
+        entry = per_model.setdefault(model, {"requests": 0, "faulted": 0, "latencies_ms": []})
         entry["requests"] += 1
         fault = rec.get("fault")
         if fault:
@@ -1244,8 +1205,7 @@ def latency_cross_check(
             "proxy_requests": len(ok_proxy),
             "matched": 0,
             "remark": (
-                "no recorder↔proxy pairs matched — the two sources stayed "
-                "inconsistent for this run"
+                "no recorder↔proxy pairs matched — the two sources stayed inconsistent for this run"
             ),
         }
     return {
@@ -1414,7 +1374,9 @@ def cross_check_usage(
         if used[i] or rec.get("error"):
             continue
         role = str(rec.get("role") or "unknown")
-        acc = unmatched_recorder.setdefault(role, {"requests": 0, "input_tokens": 0, "output_tokens": 0})
+        acc = unmatched_recorder.setdefault(
+            role, {"requests": 0, "input_tokens": 0, "output_tokens": 0}
+        )
         acc["requests"] += 1
         usage = rec.get("usage")
         if isinstance(usage, dict):
@@ -1477,9 +1439,7 @@ def _verdict(result: dict[str, Any], tasks: list[dict[str, Any]]) -> str:
         return "unknown"
     ok = bool(result.get("ok"))
     checks = result.get("checks_ok")
-    verified = all(
-        t.get("verification") in (None, "Verified successfully") for t in tasks
-    )
+    verified = all(t.get("verification") in (None, "Verified successfully") for t in tasks)
     if ok and checks is not False and verified:
         return "green"
     if ok:
@@ -1553,12 +1513,8 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
         # Repeat compaction (§10: degradation after summary) and the
         # compaction-failed state (§1.2: never fatal — gate off, run
         # continues uncompressed; the report must surface both).
-        "n_repeat_compactions": sum(
-            1 for t in tasks if t["compactions"]["repeat_compaction"]
-        ),
-        "n_summaries": sum(
-            t["compactions"]["n_summaries_in_transcript"] for t in tasks
-        ),
+        "n_repeat_compactions": sum(1 for t in tasks if t["compactions"]["repeat_compaction"]),
+        "n_summaries": sum(t["compactions"]["n_summaries_in_transcript"] for t in tasks),
         "usage": _sum_usage(tasks),
         "stability": {
             "compaction_failed": sum(t["stability"]["compaction_failed"] for t in tasks),
@@ -1568,9 +1524,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             "pending_clarification": sum(
                 1 for t in tasks if t["stability"]["pending_clarification"]
             ),
-            "excluded_from_queue": sum(
-                t["stability"]["excluded_from_queue"] for t in tasks
-            ),
+            "excluded_from_queue": sum(t["stability"]["excluded_from_queue"] for t in tasks),
         },
         "user_sim_interventions": user_sim["interventions"] if user_sim else 0,
     }
@@ -1589,9 +1543,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
     # compaction threshold from the CODING model's config — verified here,
     # not assumed. None = no tester compaction to classify.
     tester_sources = [
-        t["compactions"]["tester_threshold"]
-        for t in tasks
-        if t["compactions"]["tester_threshold"]
+        t["compactions"]["tester_threshold"] for t in tasks if t["compactions"]["tester_threshold"]
     ]
     if not tester_sources:
         tester_threshold_from_coding: bool | None = None
@@ -1665,9 +1617,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
     }
     if write:
         out = run_dir / "metrics.json"
-        out.write_text(
-            json.dumps(metrics, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        out.write_text(json.dumps(metrics, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return metrics
 
 

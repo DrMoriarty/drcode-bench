@@ -10,13 +10,11 @@ it would prove nothing).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
 import httpx
 import pytest
-
 from bench.matrix import load_matrix
 from bench.proxy import (
     FaultEngine,
@@ -26,9 +24,7 @@ from bench.proxy import (
     apply_proxy_base,
     parse_faults,
 )
-
 from tests.fake_gateway import start as start_gateway
-
 
 # --- fault engine ---------------------------------------------------------------
 
@@ -44,15 +40,18 @@ def test_fault_engine_deterministic_by_counter() -> None:
     seq = ["chat/completions"] * 6
     fired = [engine.inspect(p) for p in seq]
     assert [f.kind if f else None for f in fired] == [
-        "http_429", "http_429", None, "drop", None, None,
+        "http_429",
+        "http_429",
+        None,
+        "drop",
+        None,
+        None,
     ]
     # A fresh engine replays the same pattern — reproducibility of the
     # fault script (DoD of §9).
     engine2 = FaultEngine(engine.faults)
     again = [engine2.inspect(p) for p in seq]
-    assert [(f.kind if f else None) for f in again] == [
-        f.kind if f else None for f in fired
-    ]
+    assert [(f.kind if f else None) for f in again] == [f.kind if f else None for f in fired]
 
 
 def test_fault_engine_scope_and_independent_rules() -> None:
@@ -71,8 +70,10 @@ def test_fault_engine_rules_advance_independently() -> None:
     engine = FaultEngine(
         (FaultSpec("http_429", 1, "chat/completions"), FaultSpec("drop", 2, "chat/completions"))
     )
-    assert engine.inspect("chat/completions").kind == "http_429"
-    assert engine.inspect("chat/completions").kind == "drop"
+    fault = engine.inspect("chat/completions")
+    assert fault is not None and fault.kind == "http_429"
+    fault = engine.inspect("chat/completions")
+    assert fault is not None and fault.kind == "drop"
     assert engine.inspect("chat/completions") is None
 
 
@@ -153,9 +154,7 @@ async def test_proxy_forwards_and_injects_faults(tmp_path: Path) -> None:
                 await client.post(f"{base}/p/fake/chat/completions", json=body)
 
             # 3rd: passes through — the scripted completion over real SSE.
-            r3 = await client.post(
-                f"{base}/p/fake/chat/completions", json={**body, "stream": True}
-            )
+            r3 = await client.post(f"{base}/p/fake/chat/completions", json={**body, "stream": True})
             assert r3.status_code == 200
             assert "data: [DONE]" in r3.text
     finally:
@@ -164,7 +163,7 @@ async def test_proxy_forwards_and_injects_faults(tmp_path: Path) -> None:
         await server.wait_closed()
 
     # The log (§9/§10): one line per request, faults included.
-    entries = [json.loads(l) for l in log_path.read_text().splitlines()]
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert len(entries) == 4
     faults = [e["fault"]["kind"] for e in entries if e.get("fault")]
     assert faults == ["http_429", "drop"]
@@ -212,7 +211,7 @@ def test_apply_proxy_base_rewrites_every_provider() -> None:
         assert spec.models is providers[name].models  # untouched otherwise
     # The originals stay intact (the matrix file remains the source of
     # the real endpoints).
-    for name, spec in providers.items():
+    for spec in providers.values():
         assert "/p/" not in spec.base_url
 
 
@@ -259,16 +258,17 @@ compaction = "fake/fake-coder"
     assert project["base_url"] == "http://127.0.0.1:12345/p/fake"
     # Pre-flight passes against the proxy-routed config...
     resolved = verify_resolution(
-        paths.workspace, paths.config_home, combo, matrix_path=matrix,
+        paths.workspace,
+        paths.config_home,
+        combo,
+        matrix_path=matrix,
         proxy_base="http://127.0.0.1:12345",
     )
     assert set(resolved) == {"coding", "tester", "compaction"}
     # ...and would FAIL against the real endpoints — the two layers must
     # never disagree about where the traffic goes.
     with pytest.raises(Exception, match="pre-flight failed"):
-        verify_resolution(
-            paths.workspace, paths.config_home, combo, matrix_path=matrix
-        )
+        verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix)
 
 
 # --- scenario [proxy] section --------------------------------------------------------
@@ -282,7 +282,11 @@ def test_scenario_proxy_section_parsed() -> None:
     assert scenario.proxy is not None
     assert scenario.proxy.enabled
     assert [f.kind for f in scenario.proxy.faults] == [
-        "http_429", "http_429", "http_429", "drop", "drop",
+        "http_429",
+        "http_429",
+        "http_429",
+        "drop",
+        "drop",
     ]
     assert all(f.scope == "chat/completions" for f in scenario.proxy.faults)
     # A scenario without the section has no proxy setup.
@@ -293,7 +297,6 @@ def test_scenario_proxy_section_parsed() -> None:
 def test_scenario_proxy_faults_require_enabled(tmp_path: Path) -> None:
     from bench.scenario import ScenarioError, load_scenario
 
-    repo = Path(__file__).resolve().parents[1]
     bad = tmp_path / "s_bad"
     (bad / "seed").mkdir(parents=True)
     (bad / "seed" / "x.py").write_text("x = 1\n")
@@ -323,7 +326,6 @@ nth = 1
 def test_scenario_proxy_unknown_fault_kind_rejected(tmp_path: Path) -> None:
     from bench.scenario import ScenarioError, load_scenario
 
-    repo = Path(__file__).resolve().parents[1]
     bad = tmp_path / "s_bad2"
     (bad / "seed").mkdir(parents=True)
     (bad / "seed" / "x.py").write_text("x = 1\n")

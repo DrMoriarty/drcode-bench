@@ -44,6 +44,7 @@ request passes the proxy again), which the rules' numbering accounts for.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from dataclasses import dataclass, replace
@@ -51,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
 from .recording import JsonlSink
 
 SCHEMA = "proxy-faults/v1"
@@ -103,9 +105,7 @@ class FaultSpec:
 
     def __post_init__(self) -> None:
         if self.kind not in FAULT_KINDS:
-            raise ProxyError(
-                f"fault kind {self.kind!r} not supported — use one of {FAULT_KINDS}"
-            )
+            raise ProxyError(f"fault kind {self.kind!r} not supported — use one of {FAULT_KINDS}")
         if int(self.nth) < 1:
             raise ProxyError(f"fault nth must be >= 1, got {self.nth}")
         if self.kind == "delay" and self.delay_s <= 0:
@@ -175,8 +175,13 @@ class FaultEngine:
             return None
         rule = self.faults[fired_i]
         self.fired.append(
-            {"kind": rule.kind, "nth": rule.nth, "scope": rule.scope,
-             "path": path, "ts": time.time()}
+            {
+                "kind": rule.kind,
+                "nth": rule.nth,
+                "scope": rule.scope,
+                "path": path,
+                "ts": time.time(),
+            }
         )
         return rule
 
@@ -260,9 +265,7 @@ class ProxyApp:
         rest = parts[2] if len(parts) > 2 else ""
         base = self.upstreams.get(name)
         if base is None:
-            raise ProxyError(
-                f"no upstream for provider {name!r} (known: {sorted(self.upstreams)})"
-            )
+            raise ProxyError(f"no upstream for provider {name!r} (known: {sorted(self.upstreams)})")
         url = base.rstrip("/")
         if rest:
             url = f"{url}/{rest}"
@@ -270,12 +273,11 @@ class ProxyApp:
 
     # -- ASGI entry -------------------------------------------------------
 
-    async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ANN001
+    async def __call__(self, scope: dict, receive, send) -> None:
         if scope["type"] != "http":  # pragma: no cover - uvicorn http only
             return
         method = scope["method"].upper()
         path = scope["path"]
-        query = scope.get("query_string") or b""
         t0 = time.monotonic()
 
         body = await self._read_body(receive)
@@ -299,10 +301,8 @@ class ProxyApp:
         # Body peek: the OpenAI payload names the model — one line in the
         # log per (role-)model keeps per-model latency comparable with the
         # recorder's tags (§5). A non-JSON body (probe, garbage) is fine.
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             record["model"] = json.loads(body or b"{}").get("model") or None
-        except json.JSONDecodeError:
-            pass
 
         try:
             upstream_url, provider = self.route(path)
@@ -325,8 +325,12 @@ class ProxyApp:
                 await self._send_json(
                     send,
                     429,
-                    {"error": {"message": "rate limited by fault injection",
-                               "type": "bench_fault_injection"}},
+                    {
+                        "error": {
+                            "message": "rate limited by fault injection",
+                            "type": "bench_fault_injection",
+                        }
+                    },
                     extra_headers=[(b"retry-after", b"1")],
                 )
                 self._log(record)
@@ -335,8 +339,11 @@ class ProxyApp:
                 # Truncated response: headers promise more than is sent,
                 # then the connection dies — a transport break for the
                 # client (APIConnectionError), not an HTTP error status.
-                record.update(status=200, error="connection dropped by fault injection",
-                              latency_ms=self._ms(t0))
+                record.update(
+                    status=200,
+                    error="connection dropped by fault injection",
+                    latency_ms=self._ms(t0),
+                )
                 self.stats.errors += 1
                 await self._send_truncated(send)
                 self._log(record)
@@ -358,7 +365,7 @@ class ProxyApp:
         body: bytes,
         record: dict[str, Any],
         send,
-        t0: float,  # noqa: ANN001
+        t0: float,
     ) -> None:
         headers = self._upstream_headers(scope)
         req = self._client.build_request(
@@ -370,8 +377,9 @@ class ProxyApp:
             # Upstream transport failure is logged and surfaced as 502 —
             # a fault script produces drops, an unreachable upstream is
             # an infrastructure problem the run must SEE as one.
-            record.update(status=502, error=f"upstream {type(e).__name__}: {e}",
-                          latency_ms=self._ms(t0))
+            record.update(
+                status=502, error=f"upstream {type(e).__name__}: {e}", latency_ms=self._ms(t0)
+            )
             self.stats.errors += 1
             await self._send_json(send, 502, {"error": f"upstream unreachable: {e}"})
             self._log(record)
@@ -385,19 +393,19 @@ class ProxyApp:
         stream = "text/event-stream" in resp.headers.get("content-type", "")
         record["status"] = resp.status_code
         record["stream"] = stream
-        await send({
-            "type": "http.response.start",
-            "status": resp.status_code,
-            "headers": resp_headers,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": resp.status_code,
+                "headers": resp_headers,
+            }
+        )
         sent = 0
         try:
             async for chunk in resp.aiter_raw():
                 sent += len(chunk)
-                await send({"type": "http.response.body", "body": chunk,
-                            "more_body": True})
-            await send({"type": "http.response.body", "body": b"",
-                        "more_body": False})
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
         except httpx.HTTPError as e:
             # Died mid-relay: the client sees a truncated response (the
             # same break a `drop` fault produces) — log and give up; the
@@ -417,7 +425,7 @@ class ProxyApp:
         return int((time.monotonic() - t0) * 1000)
 
     @staticmethod
-    async def _read_body(receive) -> bytes:  # noqa: ANN001
+    async def _read_body(receive) -> bytes:
         chunks = []
         while True:
             msg = await receive()
@@ -430,7 +438,7 @@ class ProxyApp:
         return b"".join(chunks)
 
     @staticmethod
-    def _upstream_headers(scope: dict) -> dict[str, str]:  # noqa: ANN001
+    def _upstream_headers(scope: dict) -> dict[str, str]:
         """Relayed request headers minus hop-by-hop and the Host header
         (httpx sets it from the upstream URL)."""
         out = {}
@@ -442,35 +450,36 @@ class ProxyApp:
         return out
 
     @staticmethod
-    async def _send_json(send, status: int, payload: dict,  # noqa: ANN001
-                         extra_headers: list[tuple[bytes, bytes]] | None = None) -> None:
+    async def _send_json(
+        send, status: int, payload: dict, extra_headers: list[tuple[bytes, bytes]] | None = None
+    ) -> None:
         body = json.dumps(payload).encode()
         headers = [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
             *(extra_headers or []),
         ]
-        await send({"type": "http.response.start", "status": status,
-                    "headers": headers})
+        await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": body})
 
     @staticmethod
-    async def _send_truncated(send) -> None:  # noqa: ANN001
+    async def _send_truncated(send) -> None:
         """Headers with a Content-Length far beyond the body actually
         sent, then EOF: the client's HTTP stack raises an incomplete-read
         error → a connection-level failure, exactly the `drop` semantics
         of §9."""
         partial = b'{"error": {"message": "tr'
-        await send({
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", b"9999"),
-            ],
-        })
-        await send({"type": "http.response.body", "body": partial,
-                    "more_body": True})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", b"9999"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": partial, "more_body": True})
         # No final body event: uvicorn closes the connection with the
         # declared length unmet — the client sees a truncated response.
 
@@ -499,9 +508,7 @@ class FaultProxy:
         log_path: Path | None = None,
         log_bodies: bool = False,
     ) -> None:
-        self.app = ProxyApp(
-            upstreams, faults=faults, log_path=log_path, log_bodies=log_bodies
-        )
+        self.app = ProxyApp(upstreams, faults=faults, log_path=log_path, log_bodies=log_bodies)
         self.base_url: str | None = None
         self._server: Any = None
         self._task: asyncio.Task | None = None
@@ -537,16 +544,14 @@ class FaultProxy:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-            except Exception:  # noqa: BLE001 - a crashed proxy must not mask
+            except Exception:
                 pass  # the run's own result (we are in a finally block)
             self._task = None
         self.app.stats.stopped_at = time.time()
-        try:
+        with contextlib.suppress(Exception):
             await self.app.aclose()
-        except Exception:  # noqa: BLE001 - same: teardown must not raise
-            pass
 
     @property
     def stats(self) -> ProxyStats:

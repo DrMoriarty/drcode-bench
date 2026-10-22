@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from bench.matrix import load_matrix
 from bench.run_one import run_benchmark
 from bench.scenario import load_scenario_by_id
@@ -51,9 +50,7 @@ def env_guard():
     os.environ.update(saved)
 
 
-async def test_run_one_blackhole_times_out_with_diagnostics(
-    tmp_path: Path, env_guard
-) -> None:
+async def test_run_one_blackhole_times_out_with_diagnostics(tmp_path: Path, env_guard) -> None:
     matrix_path = tmp_path / "matrix.toml"
     matrix_path.write_text(MATRIX, encoding="utf-8")
     _, combos = load_matrix(matrix_path)
@@ -80,9 +77,7 @@ async def test_run_one_blackhole_times_out_with_diagnostics(
     assert result["checks_ok"] is False  # pytest cannot pass on the untouched seed
     assert (run_dir / "diagnostics" / "diagnostics.json").is_file()
     assert (run_dir / "diagnostics" / "drcode-state" / "drcode.json").is_file()
-    diag = json.loads(
-        (run_dir / "diagnostics" / "diagnostics.json").read_text(encoding="utf-8")
-    )
+    diag = json.loads((run_dir / "diagnostics" / "diagnostics.json").read_text(encoding="utf-8"))
     assert diag["state_dir_found"] is True
     assert diag["tasks"], "task JSONs must be snapshotted"
 
@@ -100,9 +95,7 @@ async def test_run_one_blackhole_times_out_with_diagnostics(
     }
 
 
-async def test_run_one_happy_path_settles_green(
-    tmp_path: Path, env_guard, monkeypatch
-) -> None:
+async def test_run_one_happy_path_settles_green(tmp_path: Path, env_guard, monkeypatch) -> None:
     """Full S1 cycle with a scripted model (no HTTP at all): the coder
     fixes the seed via run_bash, the tester stamps PASSED — the run must
     settle green and checks.py must pass."""
@@ -120,9 +113,7 @@ async def test_run_one_happy_path_settles_green(
         return ModelResponse(parts=[TextPart(content=text)])
 
     def _tool_response(tool: str, args: dict) -> ModelResponse:
-        return ModelResponse(
-            parts=[ToolCallPart(tool_name=tool, args=args, tool_call_id="c1")]
-        )
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool, args=args, tool_call_id="c1")])
 
     def _last_user_text(messages: list) -> str:
         parts = []
@@ -133,10 +124,7 @@ async def test_run_one_happy_path_settles_green(
                         parts.append(p.content)
         return "\n".join(parts)
 
-    fix_cmd = (
-        "printf 'def shout(text):\\n    return text.upper() + \"!\"\\n'"
-        " > string_utils.py"
-    )
+    fix_cmd = "printf 'def shout(text):\\n    return text.upper() + \"!\"\\n' > string_utils.py"
     state = {"steps": [], "calls": []}
 
     def fn(messages: list, info: AgentInfo) -> ModelResponse:

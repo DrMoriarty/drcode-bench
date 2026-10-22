@@ -179,9 +179,7 @@ def _parse_settle(data: dict) -> dict[str, object]:
     settle = dict(data.get("settle") or {})
     unknown = [k for k in settle if k not in KNOWN_SETTLE_KEYS]
     if unknown:
-        raise ScenarioError(
-            f"[settle]: unknown key(s) {unknown} — known: {KNOWN_SETTLE_KEYS}"
-        )
+        raise ScenarioError(f"[settle]: unknown key(s) {unknown} — known: {KNOWN_SETTLE_KEYS}")
     verification = settle.get("verification")
     if verification is not None and verification not in ("passed", "any"):
         raise ScenarioError(
@@ -194,9 +192,7 @@ def _parse_followups(data: dict) -> tuple[Followup, ...]:
     out = []
     for i, f in enumerate(data.get("followups") or []):
         when = str(f.get("when", "elapsed"))
-        if when not in ("verification_failed", "elapsed") and not when.startswith(
-            "event:"
-        ):
+        if when not in ("verification_failed", "elapsed") and not when.startswith("event:"):
             # Bare "event" is rejected on purpose: without a needle it can
             # never fire, and a silently dead followup is worse than a
             # loud load error (plan §6 p.2: condition = failed verdict /
@@ -228,11 +224,7 @@ def _parse_clarification_answers(data: dict) -> tuple[ClarificationAnswer, ...]:
         if not answer:
             raise ScenarioError(f"clarification_answers[{i}]: answer is required")
         match = a.get("match")
-        out.append(
-            ClarificationAnswer(
-                match=str(match).strip() if match else None, answer=answer
-            )
-        )
+        out.append(ClarificationAnswer(match=str(match).strip() if match else None, answer=answer))
     return tuple(out)
 
 

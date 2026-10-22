@@ -26,15 +26,22 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from bench.metrics import cross_check_usage, extract_run_metrics, transcript_responses
+from bench.recording import JsonlSink, RecordingModel, install_recorder, usage_dict
 from drcode import agent_model
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage
 
-from bench.metrics import cross_check_usage, extract_run_metrics, transcript_responses
-from bench.recording import JsonlSink, RecordingModel, install_recorder, usage_dict
+
+def _agent(model: RecordingModel) -> Agent[Any]:
+    """RecordingModel is a duck-typed Model wrapper (no inheritance), so
+    the typed Agent constructor needs a cast — runtime is fine."""
+    return Agent(cast("Any", model))
+
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -72,7 +79,7 @@ def test_request_path_logs_one_line_per_request(tmp_path: Path) -> None:
 
     sink = JsonlSink(log)
     model = RecordingModel(FunctionModel(fn), "coder@http://gw/v1", sink)
-    agent = Agent(model)
+    agent = _agent(model)
     first = asyncio.run(agent.run("hello"))
     asyncio.run(agent.run("again", message_history=first.all_messages()))
 
@@ -82,7 +89,12 @@ def test_request_path_logs_one_line_per_request(tmp_path: Path) -> None:
     assert rec["role"] == "coder@http://gw/v1"
     assert rec["streamed"] is False
     assert rec["n_history"] == 1  # fresh run: single user message
-    assert rec["usage"] == {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 0, "cache_write_tokens": 0}
+    assert rec["usage"] == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
     assert rec["latency_ms"] >= 0
     assert isinstance(rec["ts"], float)
     assert records[1]["n_history"] == 3  # request+response of the first run
@@ -105,7 +117,7 @@ def test_stream_path_stays_streaming_and_logs_final_usage(tmp_path: Path) -> Non
     model = RecordingModel(
         FunctionModel(fn, stream_function=stream_fn), "tester@http://gw/v1", JsonlSink(log)
     )
-    agent = Agent(model)
+    agent = _agent(model)
 
     async def consume() -> str:
         async with agent.run_stream("stream me") as result:
@@ -137,7 +149,7 @@ def test_request_error_is_logged_with_error_field(tmp_path: Path) -> None:
         raise RuntimeError("gateway down")
 
     model = RecordingModel(FunctionModel(fn), "coder@http://gw/v1", JsonlSink(log))
-    agent = Agent(model)
+    agent = _agent(model)
     with pytest.raises(RuntimeError):
         asyncio.run(agent.run("boom"))
 
@@ -156,7 +168,7 @@ def test_same_model_two_roles_share_one_tag(tmp_path: Path) -> None:
         model = RecordingModel(
             FunctionModel(lambda m, i: _text_response("ok")), tag, JsonlSink(log)
         )
-        asyncio.run(Agent(model).run("x"))
+        asyncio.run(_agent(model).run("x"))
     records = _read_log(log)
     assert [r["role"] for r in records] == ["same@http://gw/v1", "same@http://gw/v1"]
 
@@ -222,8 +234,18 @@ def test_load_model_log_percentiles(tmp_path: Path) -> None:
 
 def test_cross_check_usage_matches_and_flags() -> None:
     responses = [
-        {"source": "coder", "ts": "2025-01-01T00:00:00+00:00", "input_tokens": 100, "output_tokens": 10},
-        {"source": "tester", "ts": "2025-01-01T00:00:05+00:00", "input_tokens": 50, "output_tokens": 5},
+        {
+            "source": "coder",
+            "ts": "2025-01-01T00:00:00+00:00",
+            "input_tokens": 100,
+            "output_tokens": 10,
+        },
+        {
+            "source": "tester",
+            "ts": "2025-01-01T00:00:05+00:00",
+            "input_tokens": 50,
+            "output_tokens": 5,
+        },
     ]
     entries = [
         {"role": "m@u", "ts": 1735689600.1, "usage": {"input_tokens": 100, "output_tokens": 10}},
@@ -242,7 +264,12 @@ def test_cross_check_usage_matches_and_flags() -> None:
 
 def test_cross_check_usage_flags_unexplained() -> None:
     responses = [
-        {"source": "coder", "ts": "2025-01-01T00:00:00+00:00", "input_tokens": 100, "output_tokens": 10},
+        {
+            "source": "coder",
+            "ts": "2025-01-01T00:00:00+00:00",
+            "input_tokens": 100,
+            "output_tokens": 10,
+        },
     ]
     # Recorder billed nothing like that response and compaction explains none.
     entries = [
@@ -259,13 +286,21 @@ def test_transcript_responses_covers_coder_and_tester() -> None:
     task = {
         "messages": [
             {"kind": "request", "parts": []},
-            {"kind": "response", "usage": {"input_tokens": 10, "output_tokens": 2},
-             "timestamp": "2025-01-01T00:00:00+00:00", "parts": []},
+            {
+                "kind": "response",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+                "timestamp": "2025-01-01T00:00:00+00:00",
+                "parts": [],
+            },
         ],
         "tester_messages": [
             [
-                {"kind": "response", "usage": {"input_tokens": 20, "output_tokens": 4},
-                 "timestamp": "2025-01-01T00:00:09+00:00", "parts": []},
+                {
+                    "kind": "response",
+                    "usage": {"input_tokens": 20, "output_tokens": 4},
+                    "timestamp": "2025-01-01T00:00:09+00:00",
+                    "parts": [],
+                },
             ]
         ],
     }
@@ -310,15 +345,14 @@ compaction = "fake/fake-compaction"
         encoding="utf-8",
     )
 
-    from bench.run_one import run_benchmark
-    from bench.scenario import load_scenario_by_id
-
     # In-process isolation (env_setup._isolated_user_config does the same
     # for the pre-flight): drcode.config binds the user config dir at
     # import time — a real subprocess would sanitize the env before the
     # import, a pytest process must patch the binding instead, else the
     # developer's real user catalog resolves the roles.
     import drcode.config as dconfig
+    from bench.run_one import run_benchmark
+    from bench.scenario import load_scenario_by_id
 
     run_dir = tmp_path / "runs" / "s1"
     config_home = run_dir / "config-home" / "drcode"
@@ -343,7 +377,7 @@ compaction = "fake/fake-compaction"
         assert cross["matched"] == cross["transcript_responses"]
         assert cross["unexplained"] is False
         assert metrics["model_log"]["latency_ms_p50"] is not None
-        for role, entry in metrics["model_log"]["per_role"].items():
+        for entry in metrics["model_log"]["per_role"].values():
             assert entry["latency_ms_p50"] is not None
             assert entry["input_tokens"] > 0
     finally:

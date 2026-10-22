@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,7 @@ def usage_dict(response: Any) -> dict[str, int] | None:
     if callable(usage):
         try:
             usage = usage()
-        except Exception:  # noqa: BLE001 - a broken usage read is not fatal
+        except Exception:
             return None
     out = {key: int(getattr(usage, key, 0) or 0) for key in USAGE_KEYS}
     return out if any(out.values()) else None
@@ -184,7 +185,7 @@ class RecordingModel:
         model_settings: Any,
         model_request_parameters: Any,
         run_context: Any = None,
-    ) -> Any:
+    ) -> AsyncIterator[Any]:
         """Streaming request, KEPT STREAMING (§5/§13): the inner
         StreamedResponse is yielded untouched — the TUI consumes deltas
         and the watchdog depends on them. The record lands when the

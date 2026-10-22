@@ -89,8 +89,15 @@ uv run bench report runs/ --html     # + runs/report.html
 └── runs/                # артефакты прогонов (gitignored)
 ```
 
-## Тесты
+## Тесты и линтеры
 
 ```bash
-uv run pytest
+uv run pytest                                     # весь набор (в т.ч. e2e через fake gateway)
+
+# быстрые проверки качества кода (bench/ + tests/, субмодуль drcode не трогается)
+uv run ruff check .                               # линт
+uv run ruff format --check .                      # формат
+uv run pyright                                    # типы (basic mode)
 ```
+
+Конфигурация ruff/pyright — в `pyproject.toml`.

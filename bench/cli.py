@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import __version__
 from .env_setup import EnvSetupError
-from .matrix import MatrixError, get_combo, load_matrix
+from .matrix import MatrixError, load_matrix
 
 DEFAULT_MATRIX = Path(__file__).resolve().parents[1] / "matrix.toml"
 
@@ -77,9 +77,7 @@ def _describe_plan(args: argparse.Namespace) -> str:
         if not combos:
             raise MatrixError(f"no combo named '{args.combo}' in {args.matrix}")
     if args.scenario in ("all", ""):
-        scenario_ids = discover_scenarios(
-            Path(__file__).resolve().parents[1] / "scenarios"
-        )
+        scenario_ids = discover_scenarios(Path(__file__).resolve().parents[1] / "scenarios")
         if not scenario_ids:
             raise RunnerError("no scenarios under scenarios/")
     else:
@@ -87,10 +85,7 @@ def _describe_plan(args: argparse.Namespace) -> str:
     combos_str = ", ".join(c.name for c in combos)
     scenarios_str = ", ".join(scenario_ids)
     total = len(combos) * len(scenario_ids) * args.repeats
-    return (
-        f"[{combos_str}] × scenarios [{scenarios_str}] × {args.repeats} repeats "
-        f"= {total} run(s)"
-    )
+    return f"[{combos_str}] × scenarios [{scenarios_str}] × {args.repeats} repeats = {total} run(s)"
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
@@ -120,18 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser(
-        "run", help="run the matrix: scenarios × combos × repeats (§8)"
-    )
+    run = sub.add_parser("run", help="run the matrix: scenarios × combos × repeats (§8)")
     run.add_argument("--scenario", required=True, help="scenario id, or 'all'")
     run.add_argument("--matrix", default=str(DEFAULT_MATRIX), help="path to matrix.toml")
     run.add_argument("--combo", default="", help="only this combo (empty = all)")
     run.add_argument("--parallel", type=int, default=1, help="max concurrent run subprocesses")
     run.add_argument("--repeats", type=int, default=3, help="repeats per pair (default 3)")
     run.add_argument("--runs-dir", default="runs", help="artifacts directory (default runs/)")
-    run.add_argument(
-        "--no-report", action="store_true", help="skip the end-of-sweep report"
-    )
+    run.add_argument("--no-report", action="store_true", help="skip the end-of-sweep report")
     run.add_argument(
         "--use-proxy",
         action="store_true",
@@ -141,13 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=_cmd_run)
 
-    report = sub.add_parser(
-        "report", help="aggregate runs into report.md (drcode-bench.md §10)"
-    )
+    report = sub.add_parser("report", help="aggregate runs into report.md (drcode-bench.md §10)")
     report.add_argument("runs_dir", nargs="?", default="runs", help="runs directory")
-    report.add_argument(
-        "--out", default="", help="output path (default: <runs_dir>/report.md)"
-    )
+    report.add_argument("--out", default="", help="output path (default: <runs_dir>/report.md)")
     report.add_argument(
         "--html",
         action="store_true",
