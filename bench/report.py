@@ -202,7 +202,10 @@ def _cell(text: str, run_id: str | None) -> str:
     from the aggregate figure)."""
     if not run_id or text == "—":
         return text
-    return f"[{text}](runs/{run_id}/)"
+    # The report always lives inside runs_dir itself (runs/report.md), so
+    # the link is relative to the report's own directory — no `runs/`
+    # prefix (that would resolve to runs/runs/<run_id>/ in a browser).
+    return f"[{text}]({run_id}/)"
 
 
 def _with_spread(agg: dict[str, Any], suffix: str = "") -> str:
@@ -256,7 +259,7 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
+def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
     lines = [
         "| run | scenario | combo | verdict | wall-time | checks | compactions "
         "(ok/started/failed) | testing rounds | sim interventions | tasks | gate | stability | artifacts |",
@@ -264,7 +267,7 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
     ]
     for m in runs:
         run_id = m.get("run_id") or "?"
-        rel = f"{Path(runs_dir.name) / run_id}" if runs_dir.name else run_id
+        rel = run_id  # report sits in runs_dir → links relative to it
         checks = m.get("result", {}).get("checks_ok")
         checks_str = {True: "green", False: "RED", None: "n/a"}.get(
             checks if checks is None else bool(checks), "n/a"
@@ -298,13 +301,13 @@ def _run_rows(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
     return lines
 
 
-def _run_details(runs: list[dict[str, Any]], runs_dir: Path) -> list[str]:
+def _run_details(runs: list[dict[str, Any]]) -> list[str]:
     """Per-run dissection blocks: phase timings, compaction savings,
     bug round-trips — everything needed to read a run without rerunning."""
     lines: list[str] = []
     for m in runs:
         run_id = m.get("run_id") or "?"
-        rel = f"{Path(runs_dir.name) / run_id}" if runs_dir.name else run_id
+        rel = run_id  # report sits in runs_dir → links relative to it
         lines.append(f"### {run_id} — {_fmt(m.get('scenario'))} × {_fmt(m.get('combo'))}\n")
         reason = m.get("result", {}).get("reason")
         if reason:
@@ -462,11 +465,11 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
         "",
         "## Runs",
         "",
-        *_run_rows(runs, runs_dir),
+        *_run_rows(runs),
         "",
         "## Run details",
         "",
-        *_run_details(runs, runs_dir),
+        *_run_details(runs),
     ]
     report = "\n".join(lines).rstrip() + "\n"
     out.parent.mkdir(parents=True, exist_ok=True)

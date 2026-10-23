@@ -99,19 +99,20 @@ compaction = "fake/fake-compaction"
 # (§1.2, drcode ≥ 0.5.0: each compaction gate reads its own role's config).
 COMBO_EXTRA_TOML = {
     # S4: the tester's catalog context is 1000000 — the override on the
-    # tester ROLE is what the mid-round gate must divide by. The coding
-    # role gets the SAME limit deliberately: drcode's resume path
-    # (_maybe_compact_tester_round) still divides by the CODING config, so
-    # a fill between two distinct thresholds would pause the round without
-    # ever compacting it (or misclassify near the resume point). Equal
-    # limits = the moot classification ('tester', no regression possible) —
-    # the known upstream inconsistency, tracked separately in the submodule.
+    # tester ROLE is what BOTH tester gates must divide by: the pause gate
+    # and the resume-path compaction decision in
+    # _maybe_compact_tester_round (upstream 5129872 made the latter read
+    # AgentRole.TESTER too; previously it divided by the CODING config,
+    # which livelocked pause→resume-without-compaction when the limits
+    # differed). The coding role keeps its 100000 catalog entry on purpose:
+    # if any tester gate regresses to the coding config, the inflated
+    # usage never crosses ITS threshold and the tester round pauses
+    # forever — the e2e then fails on the settle timeout instead of
+    # silently passing.
     # 50000 (not smaller): the inflated usage stays OVER the threshold after
     # the compaction too (the verdict round still carries a tool result), so
     # a tiny limit would loop pause→compact forever instead of settling.
-    "s4_compaction_tester": (
-        "coding_max_context_tokens = 50000\ntester_max_context_tokens = 50000"
-    ),
+    "s4_compaction_tester": "tester_max_context_tokens = 50000",
 }
 
 COMBOS = {
@@ -328,9 +329,10 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
 
     # §1.2: the small limit landed on the tester ROLE via the combo
     # override (the catalog entry of s4-tester stays big — the override is
-    # what carried it; coding carries the same limit so the run's
-    # resume path can actually compact — see COMBO_EXTRA_TOML).
-    assert report.resolved_context_tokens["coding"] == 50000
+    # what carried it), while coding keeps its untouched catalog limit —
+    # the two roles must resolve DIFFERENT contexts now that the resume
+    # path reads the tester config too (upstream 5129872).
+    assert report.resolved_context_tokens["coding"] == 100000
     assert report.resolved_context_tokens["tester"] == 50000
 
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))

@@ -134,9 +134,10 @@ def test_generate_report_writes_markdown(tmp_path: Path) -> None:
     assert "# drcode-bench report" in text
     assert "s1_happy" in text and "combo-a" in text
     assert "r1" in text
-    # Links to the run artifacts (§10: reproducibly dissectible).
-    assert "(runs/r1/metrics.json)" in text
-    assert "(runs/r1/result.json)" in text
+    # Links to the run artifacts (§10: reproducibly dissectible), relative
+    # to the report's own directory (runs/report.md).
+    assert "(r1/metrics.json)" in text
+    assert "(r1/result.json)" in text
     assert "green" in text
     # Compaction savings table is rendered.
     assert "1550" in text and "1240" in text
@@ -240,11 +241,12 @@ def test_summary_cells_link_to_representative_run(tmp_path: Path) -> None:
     out = generate_report(tmp_path / "runs")
     text = out.read_text(encoding="utf-8")
     # The median repeat (200 s) is the link target of the wall-time cell
-    # (with the min…max spread in the same cell).
-    assert "[200 s · 100…300](runs/r2/)" in text
+    # (with the min…max spread in the same cell). Links are relative to
+    # the report's own directory (runs/report.md → runs/<run_id>/).
+    assert "[200 s · 100…300](r2/)" in text
     # The scenario and verdict cells link to the same representative run.
-    assert "[s1](runs/r2/)" in text
-    assert "[green](runs/r2/)" in text
+    assert "[s1](r2/)" in text
+    assert "[green](r2/)" in text
     # No square brackets inside link texts (nested links break markdown).
     import re as _re
 
@@ -273,4 +275,4 @@ def test_generate_report_html(tmp_path: Path) -> None:
     assert html_path.is_file()
     text = html_path.read_text(encoding="utf-8")
     assert "<table>" in text and "</html>" in text
-    assert '<a href="runs/r1/">' in text
+    assert '<a href="r1/">' in text
