@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import ssl
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -77,6 +78,21 @@ _HOP_BY_HOP = {
 
 class ProxyError(RuntimeError):
     """The proxy cannot be started or the fault script is invalid."""
+
+
+def upstream_ssl_verify() -> ssl.SSLContext | bool:
+    """Trust-store-backed TLS verification for the upstream client — mirrors
+    drcode.agent_model._ssl_verify. The corporate CAs drcode trusts are
+    missing from certifi, so a default-verify httpx client gets
+    CERTIFICATE_VERIFY_FAILED (wrapped in ConnectError → a 502 for every
+    request) against the very upstreams drcode reaches fine. Without
+    truststore installed, fall back to httpx defaults."""
+    try:
+        import truststore
+
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:
+        return True
 
 
 # --- fault script ----------------------------------------------------------------
@@ -247,6 +263,9 @@ class ProxyApp:
         self.stats = ProxyStats()
         self.sink = JsonlSink(log_path) if log_path else None
         self._client = client or httpx.AsyncClient(
+            # Same trust store drcode uses (see upstream_ssl_verify) — a
+            # CA-mismatch must not silently turn the whole run into 502s.
+            verify=upstream_ssl_verify(),
             timeout=httpx.Timeout(600.0, connect=15.0),
             # The upstream is local (or trusted); do not follow redirects —
             # relay them, the client decides.
@@ -516,6 +535,7 @@ class FaultProxy:
     async def start(self) -> str:
         import uvicorn
 
+        await self._preflight_upstreams()
         config = uvicorn.Config(
             self.app,
             host="127.0.0.1",
@@ -537,6 +557,30 @@ class FaultProxy:
         self.base_url = f"http://127.0.0.1:{port}"
         self.app.stats.started_at = time.time()
         return self.base_url
+
+    async def _preflight_upstreams(self) -> None:
+        """Fail the run loudly (ProxyError at prep time) when the proxy
+        cannot establish TLS to a real upstream. A trust-store mismatch used
+        to surface only as 502s in proxy_log.jsonl and cost a full scenario
+        timeout (s7 run 20261023-145721). Only certificate failures are
+        fatal here — any other connect problem still shows up per-request
+        as a 502 the run can report."""
+        for name, base in self.app.upstreams.items():
+            try:
+                # Any HTTP answer (even 404/401) proves the TLS layer works.
+                await self.app._client.get(base, timeout=10.0)
+            except httpx.ConnectError as e:
+                # Detection by exception type, not message: the truststore
+                # backend localizes the message (e.g. Russian macOS text).
+                cur: BaseException | None = e
+                while cur is not None:
+                    if isinstance(cur, ssl.SSLCertVerificationError):
+                        raise ProxyError(
+                            f"proxy → upstream TLS failure for provider {name!r} ({base}): "
+                            f"{e} — trust-store mismatch; install truststore or add the "
+                            "corporate CA to the certifi bundle"
+                        ) from e
+                    cur = cur.__cause__ or cur.__context__
 
     async def stop(self) -> None:
         if self._server is not None:
