@@ -212,8 +212,15 @@ def _s2a_coder_script(messages: list[dict]) -> dict:
 
 
 def _bugfix_tester_script(messages: list[dict]) -> dict:
-    """Tester for S2a/S2b: run pytest; on red — set_verification(False)
-    then create_bug_report (the tester.md order); on green — PASSED."""
+    """Tester for S2a/S2b: run pytest; on red — set_verification(False,
+    retry_here=False) then create_bug_report (the tester.md order); on
+    green — PASSED. retry_here=False is semantic, not a workaround
+    (drcode ≥ 0.5.0 defaults a bare success=False to retry_here=True,
+    which requeues the task into its own dev loop instead of finalizing
+    FAILED): the red test_pct is NOT caused by this task's changes (the
+    coder only touched div), so the failure belongs to the user — the
+    finalizing verdict that the scenario's verification_failed follow-up
+    waits for."""
     if not any(m.get("role") == "tool" for m in messages):
         return _run_bash("python3 -m pytest -q", "call_pytest")
     out = _last_bash_output(messages)
@@ -221,7 +228,11 @@ def _bugfix_tester_script(messages: list[dict]) -> dict:
     # exit=0 (pytest summary "N failed") is a failed check.
     if " failed" in out or not out.startswith("exit=0"):
         if not _called(messages, "set_verification"):
-            return _call("set_verification", {"success": False}, "call_verdict")
+            return _call(
+                "set_verification",
+                {"success": False, "retry_here": False},
+                "call_verdict",
+            )
         if not _called(messages, "create_bug_report"):
             return _call(
                 "create_bug_report",
