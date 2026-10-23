@@ -230,9 +230,11 @@ def test_report_marks_tester_threshold_source(tmp_path: Path) -> None:
     assert "REGRESSION" in report
 
 
-def test_summary_cells_link_to_representative_run(tmp_path: Path) -> None:
-    """DoD of stage 5: every summary cell clickably links to the
-    artifacts of the pair's runs/<run_id>/ (the median-wall repeat)."""
+def test_summary_links_to_representative_run(tmp_path: Path) -> None:
+    """DoD of stage 5, narrowed: the summary row carries a SINGLE link —
+    the run count cell — pointing to the artifacts of the pair's
+    runs/<run_id>/ (the median-wall repeat); the rest of the cells stay
+    plain text (they would all repeat the same target otherwise)."""
     for i, wall in enumerate((100.0, 200.0, 300.0), start=1):
         _write_run(
             tmp_path / "runs",
@@ -240,18 +242,14 @@ def test_summary_cells_link_to_representative_run(tmp_path: Path) -> None:
         )
     out = generate_report(tmp_path / "runs")
     text = out.read_text(encoding="utf-8")
-    # The median repeat (200 s) is the link target of the wall-time cell
-    # (with the min…max spread in the same cell). Links are relative to
-    # the report's own directory (runs/report.md → runs/<run_id>/).
-    assert "[200 s · 100…300](r2/)" in text
-    # The scenario and verdict cells link to the same representative run.
-    assert "[s1](r2/)" in text
-    assert "[green](r2/)" in text
-    # No square brackets inside link texts (nested links break markdown).
-    import re as _re
-
-    for m in _re.finditer(r"\[([^\]]*)\]\(([^)]+)\)", text):
-        assert "[" not in m.group(1)
+    # Links are relative to the report's own directory
+    # (runs/report.md → runs/<run_id>/).
+    assert "[3](r2/)" in text
+    # Exactly one link in the whole summary table (the Runs table below
+    # has its own per-run links, so count within the summary rows only).
+    summary_rows = [line for line in text.splitlines() if line.startswith("| s1 ")]
+    assert len(summary_rows) == 1
+    assert summary_rows[0].count("](r2/)") == 1
 
 
 def test_summary_shows_gate_verdict(tmp_path: Path) -> None:

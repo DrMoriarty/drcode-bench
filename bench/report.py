@@ -5,9 +5,9 @@
 
 The summary table is combo × scenario (§10): rows — median wall-time,
 median/sum tokens per role, verdict, number of compactions — with the
-spread over the repeats (min…max) and every cell linking to the
-artifacts of the pair's representative run (`runs/<run_id>/`, the
-median-wall repeat) so each cell is clickably dissectible.
+spread over the repeats (min…max). Every cell would otherwise repeat the
+same link, so only the run count points to the pair's representative run
+(`runs/<run_id>/`, the median-wall repeat).
 
 The per-run table links the artifacts of every run (metrics.json,
 result.json, the run dir) so each run stays reproducibly dissectible.
@@ -144,7 +144,7 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     (requests, latency p50/p95, tokens per role — §10); verdicts list all
     outcomes seen across the repeats (a pair is only as good as its worst
     repeat). `repr_run` is the median-wall repeat — the run whose
-    artifacts the summary table's cells link to."""
+    artifacts the summary table links to."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for m in runs:
         key = (m.get("scenario") or "?", m.get("combo") or "?")
@@ -188,7 +188,7 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _representative_run(group: list[dict[str, Any]], wall: dict[str, Any]) -> str | None:
-    """The run whose artifacts the summary cells link to: the median-wall
+    """The run whose artifacts the summary table links to: the median-wall
     repeat (the first run when the median is not a member / single run)."""
     median = wall.get("median")
     for m in group:
@@ -197,21 +197,20 @@ def _representative_run(group: list[dict[str, Any]], wall: dict[str, Any]) -> st
     return group[0].get("run_id") if group else None
 
 
-def _cell(text: str, run_id: str | None) -> str:
-    """A summary-table cell: every cell links to the artifacts of the
-    pair's representative run (§10/DoD: runs/<run_id>/ is one click away
-    from the aggregate figure)."""
-    if not run_id or text == "—":
-        return text
+def _run_count_cell(p: dict[str, Any]) -> str:
+    """The summary table's single link per row: the run count points to
+    the artifacts of the pair's representative run (§10/DoD:
+    runs/<run_id>/ is one click away from the aggregate figures)."""
+    run_id = p.get("repr_run")
+    if not run_id:
+        return str(p["wall_time_s"]["n"])
     # The report always lives inside runs_dir itself (runs/report.md), so
     # the link is relative to the report's own directory — no `runs/`
     # prefix (that would resolve to runs/runs/<run_id>/ in a browser).
-    return f"[{text}]({run_id}/)"
+    return f"[{p['wall_time_s']['n']}]({run_id}/)"
 
 
 def _with_spread(agg: dict[str, Any], suffix: str = "") -> str:
-    """`median` plus the min…max spread over the repeats (§10); no square
-    brackets inside (the cell text is wrapped in a markdown link)."""
     text = _fmt(agg["median"], suffix)
     if agg["n"] > 1 and agg["min"] != agg["max"]:
         text += f" · {_fmt(agg['min'])}…{_fmt(agg['max'])}"
@@ -228,11 +227,6 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
-        repr_run = p.get("repr_run")
-
-        def link(text: str, _rr: str | None = repr_run) -> str:
-            return _cell(text, _rr)
-
         lat_p50 = p["latency_ms_p50"]
         lat_str = (
             f"{_fmt(lat_p50['median'] / 1000 if lat_p50['median'] is not None else None)} / "
@@ -243,19 +237,19 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             for role, v in p["tokens_by_role"].items()
         )
         lines.append(
-            f"| {link(p['scenario'])} | {link(p['combo'])} | {p['wall_time_s']['n']} "
-            f"| {link(', '.join(p['verdicts']))} "
-            f"| {link(_with_spread(p['wall_time_s'], ' s'))} "
-            f"| {link(_with_spread(p['compactions']))} "
-            f"| {link(_fmt(p['testing_rounds']['median']))} "
-            f"| {link(_fmt(p['bug_round_trips']['median']))} "
-            f"| {link(_fmt(p['sim_interventions']['median']))} "
-            f"| {link(_with_spread(p['output_tokens']))} "
-            f"| {link(_fmt(p['model_requests']['median']))} "
-            f"| {link(lat_str)} "
-            f"| {link(tokens_by_role or '—')} "
-            f"| {link(', '.join(p['gate']))} "
-            f"| {link(', '.join(p['stability']))} |"
+            f"| {p['scenario']} | {p['combo']} | {_run_count_cell(p)} "
+            f"| {', '.join(p['verdicts'])} "
+            f"| {_with_spread(p['wall_time_s'], ' s')} "
+            f"| {_with_spread(p['compactions'])} "
+            f"| {_fmt(p['testing_rounds']['median'])} "
+            f"| {_fmt(p['bug_round_trips']['median'])} "
+            f"| {_fmt(p['sim_interventions']['median'])} "
+            f"| {_with_spread(p['output_tokens'])} "
+            f"| {_fmt(p['model_requests']['median'])} "
+            f"| {lat_str} "
+            f"| {tokens_by_role or '—'} "
+            f"| {', '.join(p['gate'])} "
+            f"| {', '.join(p['stability'])} |"
         )
     return lines
 
@@ -460,7 +454,7 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
         "## Summary (scenario × combo)",
         "",
         "Medians over the repeats of each pair; a single run is a repeat count of 1. "
-        "Every cell links to the artifacts of the pair's median-wall run.",
+        "The run count links to the artifacts of the pair's median-wall run.",
         "",
         *_pair_rows(pairs),
         "",
@@ -506,9 +500,9 @@ def _verdict_row_class(cell: str) -> str | None:
     a mix of both (one combo with correct and failed repeats) →
     `verdict-mixed`; anything else (`settled-but-flagged`, `unknown`,
     missing column) stays uncoloured.
-    Summary-table verdict cells are wrapped in a markdown link
-    (`[green, failed](<repr_run>/)`), so the link syntax is stripped
-    before the values are split out."""
+    Summary-table verdict cells carry no markdown links (only the run
+    count cell does), but the stripping keeps the helper safe either
+    way."""
     stripped = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", cell)
     verdicts = {v.strip() for v in stripped.split(",")}
     has_ok = "green" in verdicts
