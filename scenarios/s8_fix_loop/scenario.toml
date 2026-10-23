@@ -1,0 +1,57 @@
+# S8 — the tester fix loop (upstream drcode 18b48f9): a failure caused by
+# the task's OWN changes → set_verification(success=False, retry_here=True)
+# requeues the task into development (TaskManager.requeue_failed_fix,
+# fix_rounds capped by max_dev_rounds = 3), the second development round
+# repairs the regression, the second testing round passes — all WITHOUT any
+# user intervention (no followups, no clarification_answers: zero simulator
+# interventions is part of the contract, asserted by checks.py).
+#
+# Design contrast with s2a_bug_followup: there the neighbour test (test_pct)
+# is red IN THE SEED and the failure is foreign to the task (retry_here=
+# False → user follow-up). Here the FULL seed suite is green; the brief's
+# change (pad() gains truncation of long strings) breaks the dependent
+# test_row BY DESIGN, so the failure belongs to the task itself → the
+# internal fix loop, not the user path.
+#
+# NB on brief wording: the e2e test (tests/test_scenarios_e2e.py) scripts
+# the coder via the fake gateway, which keys its round-2 regression fix on
+# the literal "test_row" arriving in the tester's fix-loop report. The
+# brief must NOT contain it (or the scripted coder would repair the
+# regression in round 1, the run would settle PASSED with a single testing
+# round, and the fix-loop event would never exist). The verification rule
+# is kept paraphrased (no verdict-tool English, no test names). The change
+# is deliberately ADDITIVE w.r.t. pad()'s own pinned contract (test_pad
+# pins only short strings) — otherwise the coder's round 1 would break
+# test_pad too and the "one dependent test breaks" design would blur.
+
+id = "s8_fix_loop"
+timeout = 45  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Добавьте обрезку в pad()"
+kind = "feature"
+text = """
+В fmt.py функция pad(text, width) дополняет text пробелами справа до
+заданной ширины, а строки длиннее width возвращает без изменений.
+Измените её: строки длиннее width должны ОБРЕЗАТЬСЯ до width символов
+(дополнение пробелами сохраняется): pad("abcdefgh", 5) должна
+возвращать "abcde". Сигнатуру сохраните.
+
+Изменения вносите ТОЛЬКО в pad(): остальные функции модуля (в том числе
+row()) не трогайте, даже если полный `pytest` после правки останется
+красным из-за них. Точечная самопроверка кодера:
+`pytest test_fmt.py::test_pad` — она должна быть зелёной.
+
+Правило верификации (обязательное, адресовано проверке задачи): прогоните
+ПОЛНЫЙ `pytest` в корне задачи. Если упавший тест связан с правками самой
+этой задачи (до правки он был зелёным) — это регрессия изменения: верните
+задачу в разработку своим вердиктом с отчётом (какая команда упала и что
+вывела), заводить отдельный отчёт о дефекте не нужно. Вердикт «проверка
+пройдена» возможен ТОЛЬКО при полностью зелёном `pytest`.
+"""
+
+[settle]
+# Settle-criterion supplement (§4): the target task must end COMPLETED
+# with the tester's PASSED label — the second development round really
+# repaired the regression.
+verification = "passed"

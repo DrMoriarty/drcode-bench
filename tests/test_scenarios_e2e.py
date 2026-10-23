@@ -87,6 +87,14 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+[providers.fake.models.s8-coder]
+max_context_tokens = 100000
+max_tokens = 8192
+
+[providers.fake.models.s8-tester]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -126,6 +134,9 @@ COMBOS = {
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
     "s7_fault_injection": ("s7-coder", "s7-tester"),
+    # S8: the fix loop lives inside ONE task (coder → tester → same coder);
+    # no compaction pressure is needed — the loop is context-independent.
+    "s8_fix_loop": ("s8-coder", "s8-tester"),
 }
 
 
@@ -450,6 +461,63 @@ async def test_s7_fault_injection_end_to_end(tmp_path: Path, monkeypatch, env_gu
     from bench.report import generate_report
 
     generate_report(run_dir.parent)
+
+
+async def test_s8_fix_loop_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S8 (upstream drcode 18b48f9): the tester fix loop — the coder's
+    round-1 change breaks the dependent test_row BY DESIGN (the full seed
+    suite is green before the change, unlike s2a), the tester attributes
+    the failure to the task's own changes and stamps
+    set_verification(success=False, retry_here=True); drcode requeues the
+    task into development (fix_rounds=1 of max_dev_rounds=3), the tester's
+    report reaches the same coder transcript as the next input, round 2
+    repairs the regression and the tester stamps PASSED — with ZERO user
+    interventions (the loop closes internally, no follow-ups)."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s8_fix_loop")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+    (brief,) = report.tasks
+    assert brief["status"] == "completed"
+    assert brief["verification"] == "Verified successfully"
+    assert brief["n_testing_rounds"] >= 2  # FAILED round + post-fix-loop round
+
+    # The fix loop left its mark in the persisted task JSON: the requeue
+    # event of requeue_failed_fix with fix_rounds=1 of the cap 3 (the
+    # counter is incremented before the event is composed and the number
+    # names the UPCOMING development round — the brief is round 1).
+    raw_task = json.loads(
+        next((run_dir / "workspace" / ".drcode" / "tasks").glob("*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    events = [str(e.get("text", "")) for e in raw_task.get("events") or []]
+    assert "testing failed — returned for another development round (round 2/3)" in events, events
+    # Reset-on-success: the final PASSED verdict zeroed the counter.
+    assert raw_task.get("fix_rounds") == 0
+    # The report was consumed as ONE new prompt (no duplicates).
+    prompts = [
+        part["content"]
+        for msg in raw_task.get("messages") or []
+        for part in msg.get("parts") or []
+        if isinstance(part, dict)
+        and part.get("part_kind") == "user-prompt"
+        and "test_row" in str(part.get("content"))
+    ]
+    assert len(prompts) == 1, prompts
+
+    # §6: the contract of S8 is ZERO interventions — the simulator only
+    # wrote its start record.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["totals"]["n_testing_rounds"] >= 2
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
 
 
 async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard) -> None:

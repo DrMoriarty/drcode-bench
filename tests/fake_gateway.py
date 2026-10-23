@@ -29,7 +29,12 @@ Served models (scripted per model id, see SCRIPTS):
   drcode's mid-run compaction gate really trips);
 - ``s4-coder`` — the S4 coder: fixes report.py in one run_bash;
 - ``s4-tester`` — the S4 tester: reads the 25k-line listing in chunks
-  (inflated usage → mid-round tester compaction), then stamps PASSED.
+  (inflated usage → mid-round tester compaction), then stamps PASSED;
+- ``s8-coder`` / ``s8-tester`` — the S8 fix loop: the coder's round-1
+  edit of pad() breaks the dependent test_row by design, the tester
+  stamps set_verification(success=False, retry_here=True), the report
+  requeues the task into development, round 2 repairs the regression
+  and the tester stamps PASSED.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -63,6 +68,8 @@ MODELS = (
     "s4-tester",
     "s7-coder",
     "s7-tester",
+    "s8-coder",
+    "s8-tester",
 )
 
 
@@ -502,6 +509,88 @@ def _s7_coder_script(messages: list[dict]) -> dict:
     return _run_bash(S7_FIX, "call_fix")
 
 
+# -- S8: the tester fix loop (retry_here=True, upstream drcode 18b48f9) -----------
+
+# fmt.py with ONLY pad() gaining truncation (the S8 brief's scope — the
+# brief names no other function): the change BY DESIGN breaks test_row,
+# which consumes pad() through row() with a name longer than the column.
+# test_pad (short strings only) stays green — the change is invisible to
+# its own pinned contract.
+S8_FIX_PAD = (
+    "printf 'def pad(text, width):\n"
+    "    return text[:width].ljust(width)\n"
+    "\\n"
+    "def row(name, value, width=12):\n"
+    '    return f"{pad(name, width)}: {value}"\n'
+    "' > fmt.py"
+)
+# fmt.py after the fix-loop round: the regression from the tester's report
+# is repaired (row() keeps long names whole) while pad() keeps its new
+# truncation — the full suite is green again.
+S8_FIX_ALL = (
+    "printf 'def pad(text, width):\n"
+    "    return text[:width].ljust(width)\n"
+    "\\n"
+    "def row(name, value, width=12):\n"
+    '    return f"{pad(name, max(width, len(name)))}: {value}"\n'
+    "' > fmt.py"
+)
+
+S8_RETRY_REPORT = (
+    "Лог ошибки: python3 -m pytest -q завершается с exit=1 — падает test_row: "
+    "row('configuration', 42) вернула 'configuratio: 42', ожидалось "
+    "'configuration: 42'. Сбой вызван изменениями самой этой задачи: до правки "
+    "pad() тест был зелёным. Исправьте регрессию: имя в row() не должно "
+    "обрезаться новым pad() (верните строке её прежний контракт), новое "
+    "поведение pad() (обрезка длинных строк) сохраните, чтобы полный pytest "
+    "был зелёным."
+)
+
+
+def _s8_coder_script(messages: list[dict]) -> dict:
+    """Coder for S8: round 1 changes ONLY pad() (the brief's scope) — by
+    design that breaks test_row, which comes back to this very transcript
+    as the tester's fix-loop report; round 2 repairs the regression
+    (row() pads with spaces itself) keeping the new dot padding of pad()."""
+    if _after_own_tool_call(messages):
+        return _bash_end_run("Правка внесена.")
+    prompt = _last_user_prompt(messages)
+    # The fix-loop report (queued as the task's next input) names the
+    # broken test — the round-2 repair is keyed on it. The brief does not
+    # contain the literal, so round 1 stays scoped to pad().
+    if "test_row" in prompt:
+        return _run_bash(S8_FIX_ALL, "call_fix_regression")
+    return _run_bash(S8_FIX_PAD, "call_fix_pad")
+
+
+def _s8_tester_script(messages: list[dict]) -> dict:
+    """Tester for S8: full pytest; a red suite is a failure caused by THIS
+    task's own changes (the round-1 pad() edit broke the dependent
+    test_row) → set_verification(success=False, retry_here=True) with the
+    failure report — the fix loop requeues the task into development. A
+    green suite → PASSED. retry_here=True is semantic, not a workaround:
+    the regression belongs to the task, the report must reach the coder
+    through requeue_failed_fix's pending_input."""
+    if not any(m.get("role") == "tool" for m in messages):
+        return _run_bash("python3 -m pytest -q", "call_pytest")
+    out = _last_bash_output(messages)
+    if " failed" in out or not out.startswith("exit=0"):
+        if not _called(messages, "set_verification"):
+            return _call(
+                "set_verification",
+                {
+                    "success": False,
+                    "retry_here": True,
+                    "report": S8_RETRY_REPORT,
+                },
+                "call_verdict",
+            )
+        return _bash_end_run("Вердикт выставлен: возврат в разработку.")
+    if not _called(messages, "set_verification"):
+        return _call("set_verification", {"success": True}, "call_verdict")
+    return _bash_end_run("Тесты зелёные, задача verified.")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -517,6 +606,8 @@ SCRIPTS = {
     "s4-tester": _s4_tester_script,
     "s7-coder": _s7_coder_script,
     "s7-tester": _tester_script,
+    "s8-coder": _s8_coder_script,
+    "s8-tester": _s8_tester_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but

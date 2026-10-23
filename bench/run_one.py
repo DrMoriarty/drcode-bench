@@ -106,6 +106,7 @@ class RunReport:
 
     def dump(self, run_dir: Path) -> Path:
         out = run_dir / "result.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             json.dumps(self.__dict__, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

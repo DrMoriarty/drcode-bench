@@ -61,7 +61,18 @@ Ruff/pyright are scoped to `bench/` + `tests/` — the `drcode/` submodule is ex
 - `matrix.toml`: providers + `[[combo]]` with exactly three roles (`coding`/`tester`/`compaction`). `api_key` supports `"env:NAME"` substitution. Combo keys like `coding_max_context_tokens = 3000` become per-model catalog overrides (used to force compaction without env vars). A model entry may set `model = "<wire-name>"` — the table key becomes a local alias for a real provider model (one provider model, several context caps); alias entries are materialized into virtual providers `<provider>--<alias>` at run prep, and generated configs carry only real wire names.
 - Scenario = `scenarios/<id>/` with `seed/` (copied into the run workspace), `scenario.toml` (briefs, followups, clarification_answers, timeout, `[settle]`), and `checks.py` (harness calls `python checks.py <workspace>`; exit 0 = green). Verdicts are always **mechanical** — the harness runs pytest in the workspace itself; never judge by agent words.
 - Task kinds in briefs: `feature`/`bug` only — `research` tasks never reach the tester.
-- Implemented scenarios: S1, S2a, S2b, S3, S4, S5, S6, S7.
+- Implemented scenarios: S1, S2a, S2b, S3, S4, S5, S6, S7, S8.
+- S8 (`s8_fix_loop`) covers drcode's internal tester fix loop (upstream
+  18b48f9): the brief's change breaks a dependent test BY DESIGN (the full
+  seed suite is green before the edit — the contrast with s2a), the tester
+  stamps `set_verification(success=False, retry_here=True)`, drcode requeues
+  the task into development (`fix_rounds`, cap `max_dev_rounds`), the report
+  reaches the same coder transcript, round 2 repairs the regression → PASSED
+  with zero user interventions (no followups/clarification_answers in the
+  scenario; checks.py asserts the requeue event «round 2/3» — the counter is
+  incremented before the event is composed and names the upcoming
+  development round, ≥2 testing and development rounds, and a user_sim.jsonl
+  with only the start record).
 - S7 routes the run through `bench/proxy.py` (§9): a scenario `[proxy]` section enables it with a deterministic fault script (`[[proxy.faults]]`: `http_429`/`drop`/`delay` fired by request counter); `bench run --use-proxy` / `run_one --use-proxy` forces a fault-free recording proxy for any scenario. Proxy log → `runs/<run_id>/proxy_log.jsonl`, aggregated into `metrics.json["proxy"]` (+ `latency_cross_check` against the recorder when both are on). Note: the openai SDK inside drcode retries 429s itself (max_retries=2) — a drcode-visible 429 needs three consecutive 429 faults; connection drops are never SDK-retried.
 - Scenario briefs and docs are written in Russian; code and comments in English — keep that split.
 
