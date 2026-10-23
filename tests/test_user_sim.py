@@ -101,6 +101,46 @@ async def test_clarification_answered_by_match(tmp_path: Path) -> None:
     assert answer["detail"]["text"] == "JSON"
 
 
+async def test_clarification_waits_for_agent_turn_to_finish(tmp_path: Path) -> None:
+    """The answer must not land while the asker's agent run is live:
+    send() would requeue the task and cancel the run before it persists
+    the ask exchange — the sanitized history then drops the ask entirely
+    (s5_clarification check 3a race)."""
+    from drcode.models import Clarification
+
+    manager = make_manager(tmp_path)
+    app = FakeApp(manager)
+    task = manager.create("t", "", kind=TaskKind.FEATURE)
+    task.status = TaskStatus.AWAITING_CLARIFICATION
+    task.clarification = Clarification(question="Какой формат использовать?")
+    manager.storage.save(task)
+
+    scenario = make_scenario(
+        clarification_answers=(ClarificationAnswer(match="формат", answer="JSON"),)
+    )
+    sim = UserSimulator(app, scenario, [task], tmp_path / "sim.jsonl")
+    app.agent_running = True  # the asker's turn is still winding down
+
+    ran = asyncio.create_task(sim.run())
+    try:
+        await asyncio.sleep(0.15)  # a couple of polls: nothing sent yet
+        assert sim.actions == 0
+        assert task.status is TaskStatus.AWAITING_CLARIFICATION
+        assert task.pending_input == []
+
+        app.agent_running = False  # the turn finished and persisted
+        async with asyncio.timeout(2.0):
+            while sim.actions < 1:
+                await asyncio.sleep(0.01)
+    finally:
+        ran.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ran
+
+    assert task.status is TaskStatus.QUEUED
+    assert [e.text for e in task.pending_input] == ["JSON"]
+
+
 async def test_clarification_answered_by_order(tmp_path: Path) -> None:
     from drcode.models import Clarification, TaskKind
 

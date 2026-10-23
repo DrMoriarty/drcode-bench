@@ -9,8 +9,13 @@ very same calls the TUI itself makes: `manager.send`, nothing else; no
 1. **Auto-answer clarification.** A task in AWAITING_CLARIFICATION with
    `task.clarification` gets its answer from `scenario.clarification_answers`
    (match by question substring when `match` is set, otherwise by order)
-   and `manager.send(task_id, answer)`. No answer found → the scenario
-   FAILS (the task would hang forever waiting for a human).
+   and `manager.send(task_id, answer)` — but only once the asker's agent
+   turn has finished (`agent_running` is False): answering while the run
+   is still winding down requeues the task and cancels the run before it
+   persists the ask exchange, and the sanitized history then drops the
+   ask_clarifying_question call entirely (s5 check 3a went red because of
+   exactly this race). No answer found → the scenario FAILS (the task
+   would hang forever waiting for a human).
 2. **Follow-up comments** on the scenario schedule (`scenario.followups`):
    condition = the tester stamped FAILED / elapsed time / a task event
    containing a needle. Main case: the tester set FAILED → the simulator
@@ -126,6 +131,17 @@ class UserSimulator:
     def _answer_clarifications(self, tasks: list[Task]) -> None:
         for task in tasks:
             if task.status is not TaskStatus.AWAITING_CLARIFICATION or task.clarification is None:
+                continue
+            # A human needs a moment to read the question — and mechanically
+            # the wait is required: send() while the asker's turn is live
+            # requeues the task and cancels that run before it persists the
+            # ask exchange; the sanitized history then truncates the
+            # tool-call tail and the whole round-trip vanishes from the
+            # transcript. drcode saves the final transcript BEFORE clearing
+            # `agent_running` (pipeline.py: persist → finally), so answering
+            # on a later tick once the agent is idle guarantees the ask is
+            # in the persisted history when the resumed run loads it.
+            if getattr(self.app, "agent_running", False):
                 continue
             question = task.clarification.question
             answer = self._find_answer(question)
