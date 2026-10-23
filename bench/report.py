@@ -16,6 +16,7 @@ result.json, the run dir) so each run stays reproducibly dissectible.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import sys
 from datetime import UTC, datetime
@@ -504,8 +505,12 @@ def _verdict_row_class(cell: str) -> str | None:
     cell: green-only → `verdict-ok`, failed-only → `verdict-fail`,
     a mix of both (one combo with correct and failed repeats) →
     `verdict-mixed`; anything else (`settled-but-flagged`, `unknown`,
-    missing column) stays uncoloured."""
-    verdicts = {v.strip() for v in cell.split(",")}
+    missing column) stays uncoloured.
+    Summary-table verdict cells are wrapped in a markdown link
+    (`[green, failed](<repr_run>/)`), so the link syntax is stripped
+    before the values are split out."""
+    stripped = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", cell)
+    verdicts = {v.strip() for v in stripped.split(",")}
     has_ok = "green" in verdicts
     has_fail = "failed" in verdicts
     if has_ok and has_fail:
