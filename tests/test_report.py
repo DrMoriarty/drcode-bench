@@ -7,7 +7,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from bench.report import aggregate_pairs, discover_runs, generate_report
+from bench.report import (
+    _tokens_by_role,
+    aggregate_pairs,
+    discover_runs,
+    generate_report,
+)
+
+THIN = "\u202f"  # thousands separator used by the summary cells
+
+
+def make_model_log(per_role: dict[str, dict]) -> dict:
+    filled = {tag: {"latency_ms_total": 0, **e} for tag, e in per_role.items()}
+    return {"per_role": filled, "requests": sum(e["requests"] for e in filled.values())}
 
 
 def make_metrics(run_id: str, scenario: str, combo: str, **overrides) -> dict:
@@ -274,3 +286,203 @@ def test_generate_report_html(tmp_path: Path) -> None:
     text = html_path.read_text(encoding="utf-8")
     assert "<table>" in text and "</html>" in text
     assert '<a href="r1/">' in text
+
+
+def _summary_rows(text: str, scenario: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(f"| {scenario} ")]
+
+
+def test_summary_wall_time_whole_seconds_with_spread(tmp_path: Path) -> None:
+    """Summary wall-time is rounded to whole seconds, the unit lives in
+    the column header, and the spread over the repeats goes into
+    parentheses (`23 (19–26)`) instead of `23.1 s · 19.1…26.1`."""
+    for i, wall in enumerate((19.07, 23.1, 26.4), start=1):
+        _write_run(
+            tmp_path / "runs",
+            make_metrics(f"r{i}", "s1", "c1", wall_time_s={"settle": wall, "run": wall}),
+        )
+    out = generate_report(tmp_path / "runs")
+    text = out.read_text(encoding="utf-8")
+    assert "wall-time (median, s)" in text
+    (row,) = _summary_rows(text, "s1")
+    assert "| 23 (19–26) |" in row
+    assert "· 19" not in row  # old `median · min…max` shape is gone
+    assert ".1 s" not in row
+
+
+def test_summary_single_run_wall_time_no_spread(tmp_path: Path) -> None:
+    """A repeat count of 1 → plain whole seconds, no parentheses."""
+    _write_run(tmp_path / "runs", make_metrics("r1", "s1", "c1"))
+    out = generate_report(tmp_path / "runs")
+    (row,) = _summary_rows(out.read_text(encoding="utf-8"), "s1")
+    assert "| 100 |" in row
+
+
+def test_summary_output_tokens_thousands_separator(tmp_path: Path) -> None:
+    """Output tokens carry thin-space digit separators (1316 → `1 316`)."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s1", "c1", totals={"usage": {"output_tokens": 1316}}),
+    )
+    out = generate_report(tmp_path)
+    (row,) = _summary_rows(out.read_text(encoding="utf-8"), "s1")
+    assert f"| 1{THIN}316 |" in row
+
+
+def test_summary_tokens_spread_with_separators(tmp_path: Path) -> None:
+    """Spread over repeats keeps the separators: `1 316 (1 009–1 664)`."""
+    for i, tok in enumerate((1009, 1316, 1664), start=1):
+        _write_run(
+            tmp_path / "runs",
+            make_metrics(f"r{i}", "s1", "c1", totals={"usage": {"output_tokens": tok}}),
+        )
+    out = generate_report(tmp_path / "runs")
+    (row,) = _summary_rows(out.read_text(encoding="utf-8"), "s1")
+    assert f"| 1{THIN}316 (1{THIN}009–1{THIN}664) |" in row
+
+
+def test_summary_has_no_latency_column(tmp_path: Path) -> None:
+    """Latency p50/p95 is dropped from the summary table (it stays in the
+    run details per-role table) — no data loss, one column less to read."""
+    _write_run(tmp_path / "runs", make_metrics("r1", "s1", "c1"))
+    out = generate_report(tmp_path / "runs")
+    text = out.read_text(encoding="utf-8")
+    assert "latency p50/p95" not in text
+    pairs = aggregate_pairs([make_metrics("r1", "s1", "c1")])
+    assert "latency_ms_p50" not in pairs[0]
+    assert "latency_ms_p95" not in pairs[0]
+
+
+def test_tokens_by_role_strips_endpoint_and_merges_replicas() -> None:
+    """Recorder tags are `model@base_url`; the endpoint part is stripped
+    and same-model entries are SUMMED within each run — the s7 proxy
+    gives each replica an ephemeral port, which must not fragment one
+    model into several rows."""
+    runs = [
+        make_metrics(
+            "r1",
+            "s7",
+            "c1",
+            model_log=make_model_log(
+                {
+                    "coder@http://127.0.0.1:1111/p/copilot": {
+                        "requests": 2,
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                    },
+                    "coder@http://127.0.0.1:2222/p/copilot": {
+                        "requests": 3,
+                        "input_tokens": 200,
+                        "output_tokens": 20,
+                    },
+                    "tester@http://real.host/v1": {
+                        "requests": 1,
+                        "input_tokens": 50,
+                        "output_tokens": 5,
+                    },
+                }
+            ),
+        ),
+        make_metrics(
+            "r2",
+            "s7",
+            "c1",
+            model_log=make_model_log(
+                {
+                    "coder@http://127.0.0.1:3333/p/copilot": {
+                        "requests": 1,
+                        "input_tokens": 10,
+                        "output_tokens": 1,
+                    },
+                    "tester@http://real.host/v1": {
+                        "requests": 1,
+                        "input_tokens": 70,
+                        "output_tokens": 9,
+                    },
+                }
+            ),
+        ),
+    ]
+    roles = _tokens_by_role(runs)
+    # run1 coder = 100+200=300, run2 coder = 10 → median 155; same-model
+    # replicas summed per run, median taken over RUNS, not replicas.
+    assert roles["coder"]["n_runs"] == 2
+    assert roles["coder"]["input_tokens_median"] == 155.0
+    assert roles["coder"]["output_tokens_median"] == 15.5
+    assert roles["tester"]["n_runs"] == 2
+    assert set(roles) == {"coder", "tester"}
+
+
+def test_summary_tokens_by_role_clean_names_and_thousands(tmp_path: Path) -> None:
+    """The summary tokens-by-role cell shows bare model names with
+    separator-formatted numbers; full `model@base_url` stays in the run
+    details table."""
+    _write_run(
+        tmp_path,
+        make_metrics(
+            "r1",
+            "s7",
+            "c1",
+            model_log=make_model_log(
+                {
+                    "coder@http://127.0.0.1:1111/p/copilot": {
+                        "requests": 2,
+                        "input_tokens": 39334,
+                        "output_tokens": 1316,
+                    },
+                }
+            ),
+        ),
+    )
+    out = generate_report(tmp_path)
+    text = out.read_text(encoding="utf-8")
+    (row,) = _summary_rows(text, "s7")
+    assert f"coder: 39{THIN}334/1{THIN}316" in row
+    assert "@" not in row
+    # Run details keep the full tag (§10: reproducibly dissectible).
+    assert "coder@http://127.0.0.1:1111/p/copilot" in text
+
+
+def test_run_rows_wall_time_one_decimal(tmp_path: Path) -> None:
+    """Per-run wall-time keeps one decimal (`19.1 s`), not full float spam."""
+    _write_run(
+        tmp_path, make_metrics("r1", "s1", "c1", wall_time_s={"settle": 19.0744, "run": 19.0744})
+    )
+    out = generate_report(tmp_path)
+    text = out.read_text(encoding="utf-8")
+    assert "| 19.1 s |" in text
+    assert "19.0744" not in text
+
+
+def test_html_spread_on_second_line(tmp_path: Path) -> None:
+    """HTML summary cells split the spread onto a small gray second line
+    (`<br>` + span.spread); right-aligned numeric cells get class=num."""
+    for i, wall in enumerate((19.07, 23.1, 26.4), start=1):
+        _write_run(
+            tmp_path / "runs",
+            make_metrics(
+                f"r{i}",
+                "s1",
+                "c1",
+                wall_time_s={"settle": wall, "run": wall},
+                totals={"usage": {"output_tokens": 1000 + i}},
+            ),
+        )
+    out = generate_report(tmp_path / "runs", html=True)
+    text = out.with_suffix(".html").read_text(encoding="utf-8")
+    assert ".spread{color:#777;font-size:0.85em;}" in text
+    assert "td.num{text-align:right;}" in text
+    assert '<span class="spread">19–26</span>' in text
+    # The spread marker itself never leaks into the HTML.
+    assert "<br><span" in text
+
+
+def test_html_plain_cells_not_transformed(tmp_path: Path) -> None:
+    """Non-numeric cells (combos, verdicts, prose with parentheses) must
+    stay untouched by the spread rendering."""
+    _write_run(tmp_path, make_metrics("r1", "s1", "c1"))
+    out = generate_report(tmp_path, html=True)
+    text = out.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<span class="spread">' not in text
+    assert "<td>green</td>" in text
+    assert "<td>c1</td>" in text

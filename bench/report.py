@@ -19,6 +19,7 @@ import json
 import re
 import statistics
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -102,14 +103,27 @@ def _model_log(m: dict[str, Any]) -> dict[str, Any]:
 
 def _tokens_by_role(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Per-role token totals aggregated over the repeats of a pair
-    (§10: recorder per-role prompt/completion sums, medians over runs)."""
+    (§10: recorder per-role prompt/completion sums, medians over runs).
+
+    Recorder role tags are `model@base_url` (bench/recording.py); the
+    `@base_url` part is stripped and entries of the same model are
+    SUMMED within each run before the median — the s7 proxy gives each
+    replica a distinct ephemeral port, which would otherwise fragment
+    one model into several rows."""
     per_run: dict[str, list[tuple[int, int]]] = {}
     for m in runs:
-        log = _model_log(m)
-        for role, e in (log.get("per_role") or {}).items():
-            per_run.setdefault(role, []).append(
-                (int(e.get("input_tokens") or 0), int(e.get("output_tokens") or 0))
+        # Sum same-model entries within the run (replicas differ only in
+        # the ephemeral base_url port), then collect one pair per run.
+        sums: dict[str, tuple[int, int]] = {}
+        for role, e in (_model_log(m).get("per_role") or {}).items():
+            model = role.split("@", 1)[0].strip() or role
+            prev = sums.get(model, (0, 0))
+            sums[model] = (
+                prev[0] + int(e.get("input_tokens") or 0),
+                prev[1] + int(e.get("output_tokens") or 0),
             )
+        for model, pair in sums.items():
+            per_run.setdefault(model, []).append(pair)
     out: dict[str, dict[str, Any]] = {}
     for role, values in per_run.items():
         inputs = [v[0] for v in values]
@@ -141,7 +155,8 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Shape is repeat-ready: every pair carries `_agg` blocks for wall-time,
     compactions, testing rounds and the recorder's model traffic
-    (requests, latency p50/p95, tokens per role — §10); verdicts list all
+    (requests, tokens per role — §10; latency p50/p95 stays per run in
+    the run details); verdicts list all
     outcomes seen across the repeats (a pair is only as good as its worst
     repeat). `repr_run` is the median-wall repeat — the run whose
     artifacts the summary table links to."""
@@ -161,8 +176,6 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             [((m.get("totals") or {}).get("usage") or {}).get("output_tokens") for m in group]
         )
         requests = _agg([_model_log(m).get("requests") for m in group])
-        latency_p50 = _agg([_model_log(m).get("latency_ms_p50") for m in group])
-        latency_p95 = _agg([_model_log(m).get("latency_ms_p95") for m in group])
         pairs.append(
             {
                 "scenario": scenario,
@@ -177,8 +190,6 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "sim_interventions": sim_interventions,
                 "output_tokens": tokens,
                 "model_requests": requests,
-                "latency_ms_p50": latency_p50,
-                "latency_ms_p95": latency_p95,
                 "tokens_by_role": _tokens_by_role(group),
                 "gate": sorted({((m.get("gate") or {}).get("verdict") or "n/a") for m in group}),
                 "stability": sorted({_stability_flags(m) for m in group} - {"clean"}) or ["clean"],
@@ -210,10 +221,32 @@ def _run_count_cell(p: dict[str, Any]) -> str:
     return f"[{p['wall_time_s']['n']}]({run_id}/)"
 
 
-def _with_spread(agg: dict[str, Any], suffix: str = "") -> str:
-    text = _fmt(agg["median"], suffix)
+def _thousands(value: Any) -> str:
+    """Integer with thin-space thousands separators (1316 → `1 316`);
+    `—` for missing values."""
+    if value is None:
+        return "—"
+    return f"{int(value):,}".replace(",", "\u202f")
+
+
+def _sec_whole(value: Any) -> str:
+    """Whole seconds, unit omitted (it lives in the column header)."""
+    return "—" if value is None else str(round(float(value)))
+
+
+def _sec_1dec(value: Any) -> str:
+    """Wall-time with one decimal, unit attached (per-run rows)."""
+    return "—" if value is None else f"{float(value):.1f} s"
+
+
+def _with_spread(agg: dict[str, Any], fmt: Callable[[Any], str] = _fmt) -> str:
+    """A summary-table cell: the median, with the min–max spread over the
+    repeats in parentheses when it exists (`23 (19–26)`). The unit lives
+    in the column header, not in the cell; in the HTML rendering the
+    spread moves to a second line of the cell (see `_md_to_html`)."""
+    text = fmt(agg["median"])
     if agg["n"] > 1 and agg["min"] != agg["max"]:
-        text += f" · {_fmt(agg['min'])}…{_fmt(agg['max'])}"
+        text += f" ({fmt(agg['min'])}–{fmt(agg['max'])})"
     return text
 
 
@@ -222,31 +255,24 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
         "| scenario | combo | runs | verdicts | wall-time (median, s) | "
         "compactions (med) | testing rounds (med) | bug round-trips (med) | "
         "sim interventions (med) | output tokens (med) | "
-        "model requests (med) | latency p50/p95 (med, s) | "
-        "tokens by role (med, prompt/compl.) | gate | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "model requests (med) | tokens by role (med, prompt/compl.) | gate | stability |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
-        lat_p50 = p["latency_ms_p50"]
-        lat_str = (
-            f"{_fmt(lat_p50['median'] / 1000 if lat_p50['median'] is not None else None)} / "
-            f"{_fmt(p['latency_ms_p95']['median'] / 1000 if p['latency_ms_p95']['median'] is not None else None)}"
-        )
         tokens_by_role = "; ".join(
-            f"{role}: {_fmt(v['input_tokens_median'])}/{_fmt(v['output_tokens_median'])}"
+            f"{role}: {_thousands(v['input_tokens_median'])}/{_thousands(v['output_tokens_median'])}"
             for role, v in p["tokens_by_role"].items()
         )
         lines.append(
             f"| {p['scenario']} | {p['combo']} | {_run_count_cell(p)} "
             f"| {', '.join(p['verdicts'])} "
-            f"| {_with_spread(p['wall_time_s'], ' s')} "
+            f"| {_with_spread(p['wall_time_s'], _sec_whole)} "
             f"| {_with_spread(p['compactions'])} "
             f"| {_fmt(p['testing_rounds']['median'])} "
             f"| {_fmt(p['bug_round_trips']['median'])} "
             f"| {_fmt(p['sim_interventions']['median'])} "
-            f"| {_with_spread(p['output_tokens'])} "
+            f"| {_with_spread(p['output_tokens'], _thousands)} "
             f"| {_fmt(p['model_requests']['median'])} "
-            f"| {lat_str} "
             f"| {tokens_by_role or '—'} "
             f"| {', '.join(p['gate'])} "
             f"| {', '.join(p['stability'])} |"
@@ -286,7 +312,7 @@ def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
             gate += " ⚠"
         lines.append(
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
-            f"| {_fmt(m.get('verdict'))} | {_fmt(m.get('wall_time_s', {}).get('settle'), ' s')} "
+            f"| {_fmt(m.get('verdict'))} | {_sec_1dec(m.get('wall_time_s', {}).get('settle'))} "
             f"| {checks_str} | {comp_str} "
             f"| {_fmt(comp.get('n_testing_rounds'))} | {sim_str} | {verdicts} "
             f"| {gate} "
@@ -516,6 +542,28 @@ def _verdict_row_class(cell: str) -> str | None:
     return None
 
 
+# Summary-table spread cells (`23 (19–26)`, thousands separated by
+# thin spaces) — rendered in HTML as the median on the first line and
+# the min–max spread on a small gray second line.
+_SPREAD_CELL_RE = re.compile(r"^(\d[\d\u202f ]*) \((\d[\d\u202f ]*–\d[\d\u202f ]+)\)$")
+_PLAIN_NUMBER_RE = re.compile(r"^\d+([\u202f ]\d+)*$")
+
+
+def _render_cell(cell: str, *, summary: bool) -> str:
+    """One table cell → HTML: inline markdown, plus (summary tables only)
+    the two-line spread layout and right alignment for numeric cells."""
+    rendered = _md_inline(cell)
+    if summary:
+        m = _SPREAD_CELL_RE.match(cell)
+        if m:
+            return (
+                f'{_md_inline(m.group(1))}<br><span class="spread">{_md_inline(m.group(2))}</span>'
+            )
+        if _PLAIN_NUMBER_RE.match(cell):
+            return f'<span class="num">{rendered}</span>'
+    return rendered
+
+
 def _md_to_html(md: str) -> str:
     """A small renderer for the report's own markdown subset: headings,
     paragraphs, `- ` lists and pipe tables. Enough for report.html without
@@ -530,6 +578,11 @@ def _md_to_html(md: str) -> str:
         "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;vertical-align:top;}",
         "th{background:#f4f4f4;}",
         "code{background:#f4f4f4;padding:0 4px;}",
+        # Summary-table spread cells: median on the first line, the
+        # min–max spread on a small gray second line; numeric cells
+        # right-aligned.
+        ".spread{color:#777;font-size:0.85em;}",
+        "td.num{text-align:right;}",
         # Verdict colouring (§10): pale green — all repeats green, pale red —
         # all repeats failed, pale yellow — a summary row mixing both.
         "tr.verdict-ok{background:#d9ead3;}",
@@ -563,6 +616,10 @@ def _md_to_html(md: str) -> str:
                 i += 1
             out.append("<table>")
             verdict_col: int | None = None
+            # The two-line spread layout is a summary-table feature —
+            # recognized by its wall-time header (the runs/dissection
+            # tables have no spread cells to transform).
+            is_summary = any(c == "wall-time (median, s)" for c in rows[0])
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 if r == 0:
@@ -577,9 +634,10 @@ def _md_to_html(md: str) -> str:
                     row_cls = _verdict_row_class(row[verdict_col])
                     if row_cls:
                         cls = f' class="{row_cls}"'
-                out.append(
-                    f"<tr{cls}>" + "".join(f"<{tag}>{_md_inline(c)}</{tag}>" for c in row) + "</tr>"
+                body = "".join(
+                    f"<{tag}>{_render_cell(c, summary=is_summary and r > 0)}</{tag}>" for c in row
                 )
+                out.append(f"<tr{cls}>{body}</tr>")
             out.append("</table>")
         elif line.lstrip().startswith("- "):
             out.append("<ul>")
