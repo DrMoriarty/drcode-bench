@@ -486,3 +486,53 @@ def test_html_plain_cells_not_transformed(tmp_path: Path) -> None:
     assert '<span class="spread">' not in text
     assert "<td>green</td>" in text
     assert "<td>c1</td>" in text
+
+
+def test_report_has_glossary_section(tmp_path: Path) -> None:
+    """§10: the terse gate/stability codes of the tables are spelled out
+    in a Glossary section at the end of the markdown report."""
+    _write_run(tmp_path, make_metrics("r1", "s1", "c1"))
+    text = generate_report(tmp_path).read_text(encoding="utf-8")
+    assert "## Glossary" in text
+    assert "gate `ok`" in text
+    assert "gate `OVERLAP`" in text
+    assert "stability `faults×N`" in text
+    assert "stability `compact-fail×N`" in text
+    assert "stability `net-retry×N`" in text
+    assert "stability `stuck-clarif`" in text
+    assert "stability `clean`" in text
+    # The section comes after Run details (it explains their codes).
+    assert text.index("## Run details") < text.index("## Glossary")
+
+
+def test_html_glossary_tooltips(tmp_path: Path) -> None:
+    """Gate/stability cells of the summary and runs tables get
+    `<abbr title=...>` hover tooltips (the `label×N` counted form
+    included); other columns stay plain."""
+    m = make_metrics("r1", "s1", "c1")
+    m["totals"]["stability"]["network_retries"] = 3
+    m["gate"] = {"verdict": "ok"}
+    _write_run(tmp_path, m)
+    _write_run(tmp_path, make_metrics("r2", "s1", "c1"))  # clean stability
+    out = generate_report(tmp_path, html=True)
+    text = out.with_suffix(".html").read_text(encoding="utf-8")
+    # Gate cell (both tables: summary + per-run) and the counted
+    # stability form are wrapped; the tooltip text is the definition.
+    assert '<abbr title="the gate' in text
+    assert ">ok</abbr>" in text
+    assert ">net-retry×3</abbr>" in text
+    assert ">clean</abbr>" in text
+    # Non-glossary cells are untouched by the tooltip pass.
+    assert "<td>green</td>" in text
+    assert "<td>c1</td>" in text
+
+
+def test_html_glossary_tooltips_overlap_warning_kept(tmp_path: Path) -> None:
+    """The runs-table gate cell `OVERLAP ⚠` is wrapped whole — the
+    warning mark survives next to the tooltip."""
+    m = make_metrics("r1", "s6_queue_priority", "c1")
+    m["gate"] = {"verdict": "OVERLAP", "overlaps": [{"detail": "x"}]}
+    _write_run(tmp_path, m)
+    out = generate_report(tmp_path, html=True)
+    text = out.with_suffix(".html").read_text(encoding="utf-8")
+    assert ">OVERLAP</abbr> ⚠" in text

@@ -11,6 +11,10 @@ same link, so only the run count points to the pair's representative run
 
 The per-run table links the artifacts of every run (metrics.json,
 result.json, the run dir) so each run stays reproducibly dissectible.
+
+The terse codes of the gate/stability columns are spelled out in a
+Glossary section (§10) and as `<abbr title=...>` hover tooltips in the
+HTML rendering.
 """
 
 from __future__ import annotations
@@ -27,6 +31,89 @@ from typing import Any
 from .metrics import MetricsError, extract_run_metrics
 
 SCHEMA = "report/v1"
+
+# §10: the terse codes of the `gate` and `stability` columns, spelled out
+# both in the report's Glossary section (`_glossary_lines`) and as hover
+# tooltips in the HTML rendering (`_glossary_abbr`). Keys match the cell
+# labels; the counted `label×N` form (`net-retry×3`) is matched by the
+# label prefix.
+GLOSSARY: dict[str, str] = {
+    "ok": (
+        "the gate 'no development while testing is in flight' held: coder "
+        "and tester activity intervals never overlapped (verified from "
+        "transcripts and model_log.jsonl)"
+    ),
+    "OVERLAP": (
+        "gate violation: coder and tester activity overlapped (see the "
+        "per-run GATE VIOLATION block in Run details)"
+    ),
+    "faults": (
+        "faults injected by the proxy fault script (s7 [proxy] runs / "
+        "--use-proxy); the retries they caused appear alongside as net-retry"
+    ),
+    "compact-fail": (
+        "compaction failed: drcode does not abort — it disables the "
+        "compaction gate (`_compaction_failed`) and continues with the "
+        "UNCOMPRESSED history (summaries may be missing from transcripts)"
+    ),
+    "tester-fail": "tester failures",
+    "net-retry": "drcode retried a failed model request",
+    "unfinished": "task not finished by the end of the run",
+    "stuck-clarif": "task left pending clarification",
+    "excluded": "task excluded from the queue",
+    "clean": "none of the above",
+}
+
+# Which column each glossary term belongs to (for the Glossary section).
+_GLOSSARY_COLUMN: dict[str, str] = {
+    "ok": "gate",
+    "OVERLAP": "gate",
+    **{t: "stability" for t in GLOSSARY if t not in ("ok", "OVERLAP")},
+}
+
+# Terms always carrying a count in the cells — shown in the glossary with
+# the `label×N` form (`faults×N`); the others appear bare at count 1.
+_GLOSSARY_COUNTED = frozenset({"faults", "compact-fail", "tester-fail", "net-retry"})
+
+
+def _glossary_lines() -> list[str]:
+    """The '## Glossary' section: one line per terse code, in column order."""
+    lines = [
+        "## Glossary",
+        "",
+        "Meaning of the codes in the `gate` and `stability` columns:",
+        "",
+    ]
+    for term, definition in GLOSSARY.items():
+        label = f"{term}×N" if term in _GLOSSARY_COUNTED else term
+        lines.append(f"- {_GLOSSARY_COLUMN[term]} `{label}` — {definition}")
+    return lines
+
+
+# Longest-first alternation so no term shadows a prefix of another; the
+# lookarounds keep whole-label matching (a term must not light up inside
+# a longer word, but `net-retry×3` and `OVERLAP ⚠` must match).
+_GLOSSARY_TERM_RE = re.compile(
+    rf"(?<![\w-])({'|'.join(re.escape(t) for t in sorted(GLOSSARY, key=len, reverse=True))})"
+    r"(×\d+)?(?![\w-])"
+)
+
+
+def _glossary_abbr(rendered: str) -> str:
+    """Wrap the known gate/stability terms of an already-rendered cell in
+    `<abbr title=...>` hover tooltips (§10: the codes are always
+    interpretable, not only in the Glossary section). The visible text
+    keeps its `_md_inline` escaping (the terms are plain words, so
+    escaping is a no-op on them); the `title` attribute is escaped
+    separately."""
+    import html as _html
+
+    def _repl(m: re.Match[str]) -> str:
+        term = m.group(1)
+        title = _html.escape(GLOSSARY[term], quote=True)
+        return f'<abbr title="{title}">{m.group(0)}</abbr>'
+
+    return _GLOSSARY_TERM_RE.sub(_repl, rendered)
 
 
 def _fmt(value: Any, suffix: str = "") -> str:
@@ -491,6 +578,10 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
         "## Run details",
         "",
         *_run_details(runs),
+        "",
+        # §10: the terse gate/stability codes of the tables above, spelled
+        # out at the end of the report.
+        *_glossary_lines(),
     ]
     report = "\n".join(lines).rstrip() + "\n"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -549,9 +640,10 @@ _SPREAD_CELL_RE = re.compile(r"^(\d[\d\u202f ]*) \((\d[\d\u202f ]*–\d[\d\u202f
 _PLAIN_NUMBER_RE = re.compile(r"^\d+([\u202f ]\d+)*$")
 
 
-def _render_cell(cell: str, *, summary: bool) -> str:
+def _render_cell(cell: str, *, summary: bool, glossary: bool = False) -> str:
     """One table cell → HTML: inline markdown, plus (summary tables only)
-    the two-line spread layout and right alignment for numeric cells."""
+    the two-line spread layout and right alignment for numeric cells, plus
+    (gate/stability cells only) `<abbr>` hover tooltips from GLOSSARY."""
     rendered = _md_inline(cell)
     if summary:
         m = _SPREAD_CELL_RE.match(cell)
@@ -561,7 +653,7 @@ def _render_cell(cell: str, *, summary: bool) -> str:
             )
         if _PLAIN_NUMBER_RE.match(cell):
             return f'<span class="num">{rendered}</span>'
-    return rendered
+    return _glossary_abbr(rendered) if glossary else rendered
 
 
 def _md_to_html(md: str) -> str:
@@ -620,6 +712,12 @@ def _md_to_html(md: str) -> str:
             # recognized by its wall-time header (the runs/dissection
             # tables have no spread cells to transform).
             is_summary = any(c == "wall-time (median, s)" for c in rows[0])
+            # Tooltip hook: gate/stability columns of the summary/runs
+            # tables get GLOSSARY hover tooltips on their terse codes
+            # (the dissection tables have no such columns).
+            glossary_cols = {
+                c for c, cell in enumerate(rows[0]) if cell.lower() in ("gate", "stability")
+            }
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 if r == 0:
@@ -635,7 +733,8 @@ def _md_to_html(md: str) -> str:
                     if row_cls:
                         cls = f' class="{row_cls}"'
                 body = "".join(
-                    f"<{tag}>{_render_cell(c, summary=is_summary and r > 0)}</{tag}>" for c in row
+                    f"<{tag}>{_render_cell(cell, summary=is_summary and r > 0, glossary=r > 0 and ci in glossary_cols)}</{tag}>"
+                    for ci, cell in enumerate(row)
                 )
                 out.append(f"<tr{cls}>{body}</tr>")
             out.append("</table>")
