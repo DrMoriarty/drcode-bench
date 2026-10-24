@@ -43,6 +43,20 @@ create_bug_report): оформление баг-репортов — обяза�
 отчёте/комментарии.
 """
 
+[[clarification_answers]]
+# The tester's bug-report task invites the coder to peek at the other red
+# tests and ask what to do with them (observed in run
+# 20261024-173446: «...вне объёма задачи #07fd139b — исправить их сейчас
+# или оставить как есть (зарегистрировать как отдельные баги)?»). Any-of
+# substrings over the question, case-insensitive — the model paraphrases
+# run to run (same rationale as S5).
+match = ["вне объёма", "оставить как есть", "отдельные баги", "исправить их"]
+answer = """
+Падения pct() и export_api() находятся вне объёма задачи — исправлять их сейчас
+не нужно, дефекты уже зафиксированы отдельным bug-report'ом. Завершите текущую
+задачу, ничего дополнительно не меняя.
+"""
+
 [settle]
 # The label of the briefs is not constrained here on purpose: the S2b
 # contract (queue priority, both briefs done, the bug task tested) is
