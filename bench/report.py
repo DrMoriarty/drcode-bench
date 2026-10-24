@@ -670,6 +670,9 @@ def _md_to_html(md: str) -> str:
         "th,td{border:1px solid #bbb;padding:4px 10px;text-align:left;vertical-align:top;}",
         "th{background:#f4f4f4;}",
         "code{background:#f4f4f4;padding:0 4px;}",
+        # Glossary hover tooltips (§10): make the <abbr> cells visibly
+        # hoverable (dotted underline + help cursor).
+        "abbr{cursor:help;text-decoration:underline dotted;}",
         # Summary-table spread cells: median on the first line, the
         # min–max spread on a small gray second line; numeric cells
         # right-aligned.
