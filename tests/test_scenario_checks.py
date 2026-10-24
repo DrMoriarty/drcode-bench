@@ -140,7 +140,7 @@ def write_task(workspace: Path, **fields) -> dict:
         "events": fields.get("events", []),
         "pending_input": fields.get("pending_input", []),
         "activated_at": fields.get("activated_at"),
-        "created_at": "2025-06-01T10:00:00+00:00",
+        "created_at": fields.get("created_at", "2025-06-01T10:00:00+00:00"),
     }
     path = workspace / ".drcode" / "tasks" / f"{task['id']}.json"
     path.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
@@ -324,6 +324,57 @@ def test_s2b_checks_bite_on_unverified_bug(tmp_path: Path) -> None:
     )
     result = run_checks("s2b_bug_report", workspace)
     assert result.returncode == 1
+    assert "verification" in result.stdout
+
+
+def test_s2b_checks_extra_bug_task_does_not_hide_report_violations(tmp_path: Path) -> None:
+    """When the run produced MORE than one kind=bug task, the count failure
+    fires — but checks 3/4 must still run on the heuristically chosen
+    tester's report (title outside the briefs, earliest created) instead of
+    being silently skipped."""
+    run_dir = make_workspace(tmp_path, "s2b_bug_report", fix=True)
+    workspace = run_dir / "workspace"
+    scenario = load_scenario_toml("s2b_bug_report")
+    write_task(
+        workspace,
+        id="briefA",
+        title=scenario["briefs"][0]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:05+00:00",
+        tester_messages=[[]],
+    )
+    write_task(
+        workspace,
+        id="briefB",
+        title=scenario["briefs"][1]["title"],
+        kind="feature",
+        activated_at="2025-06-01T10:00:20+00:00",
+        tester_messages=[[]],
+    )
+    write_task(
+        workspace,
+        id="bug1",
+        title="Починить pct()",
+        kind="bug",
+        created_at="2025-06-01T10:00:10+00:00",
+        activated_at="2025-06-01T10:00:10+00:00",
+        verification="Verification failed",  # violated check 3
+        tester_messages=[[]],
+    )
+    # A spurious second bug task created LATER — must not shadow bug1.
+    write_task(
+        workspace,
+        id="bug2",
+        title="Ещё один баг",
+        kind="bug",
+        created_at="2025-06-01T10:05:00+00:00",
+        activated_at="2025-06-01T10:05:00+00:00",
+        tester_messages=[[]],
+    )
+    result = run_checks("s2b_bug_report", workspace)
+    assert result.returncode == 1
+    assert "expected exactly 1 kind=bug task" in result.stdout
+    assert "Verification failed" in result.stdout  # check 3 reported, not skipped
 
 
 # -- S5 -----------------------------------------------------------------------

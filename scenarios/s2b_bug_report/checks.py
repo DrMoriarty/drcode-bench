@@ -64,19 +64,31 @@ def main() -> int:
         )
 
     # 2. Exactly one kind=bug task, and it is the tester's report (not a brief).
+    #    Even when the count is off, checks 3/4 still run on the best
+    #    candidate for the tester's report (title outside the briefs; among
+    #    several — the earliest created), so one checks.py run reports ALL
+    #    violations instead of stopping at the count failure.
     bugs = [t for t in tasks if t.get("kind") == "bug"]
     if len(bugs) != 1:
-        failures.append(f"expected exactly 1 kind=bug task (the tester's report), found {len(bugs)}")
-        bug = None
+        failures.append(
+            f"expected exactly 1 kind=bug task (the tester's report), found {len(bugs)}"
+        )
+    candidates = [t for t in bugs if t.get("title") not in brief_titles]
+    if candidates:
+        bug = min(candidates, key=lambda t: str(t.get("created_at") or ""))
+    elif bugs:
+        bug = min(bugs, key=lambda t: str(t.get("created_at") or ""))
     else:
-        bug = bugs[0]
-        if bug.get("title") in brief_titles:
-            failures.append("the kind=bug task is a brief — expected the tester's own report")
+        bug = None
+    if len(bugs) == 1 and bug is not None and bug.get("title") in brief_titles:
+        failures.append("the kind=bug task is a brief — expected the tester's own report")
 
     # 5. Everything COMPLETED.
     for t in tasks:
         if t.get("status") != "completed":
-            failures.append(f"task {t.get('id')} ({t.get('title')!r}): status={t.get('status')!r}, expected 'completed'")
+            failures.append(
+                f"task {t.get('id')} ({t.get('title')!r}): status={t.get('status')!r}, expected 'completed'"
+            )
 
     if bug is not None:
         # 3. The bug task passed its own testing round.
