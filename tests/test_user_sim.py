@@ -101,6 +101,63 @@ async def test_clarification_answered_by_match(tmp_path: Path) -> None:
     assert answer["detail"]["text"] == "JSON"
 
 
+def test_find_answer_anyof_list_matches_paraphrase(tmp_path: Path) -> None:
+    """List `match` = any-of substrings, case-insensitive. The question is
+    the real one from run 20261024-130550 (s5, combo
+    degradation-weak-compactor): it contains the Latin function name
+    format_price and the word «стандарт», but NO Cyrillic «формат» — the
+    old single-substring matcher recorded a hard scenario failure here."""
+    from bench.user_sim import UserSimulator
+
+    scenario = make_scenario(
+        clarification_answers=(
+            ClarificationAnswer(
+                match=["формат", "стандарт", "оформления цен"],
+                answer="Стандарт: 1 234,50 ₽",
+            ),
+        )
+    )
+    sim = UserSimulator(object(), scenario, [], tmp_path / "sim.jsonl")
+
+    failing = (
+        "Опишите, пожалуйста, корпоративный стандарт оформления цен: как "
+        "должна выглядеть строка, которую возвращает format_price(amount, "
+        "currency)? Например: какой разделитель тысяч и дробной части, …"
+    )
+    assert sim._find_answer(failing) == "Стандарт: 1 234,50 ₽"
+    assert sim._find_answer("Какой ФОРМАТ использовать?") == "Стандарт: 1 234,50 ₽"
+    assert sim._find_answer("Что делать?") is None
+
+    # A single-string match still works (the pre-list shape).
+    scenario = make_scenario(
+        clarification_answers=(ClarificationAnswer(match="формат", answer="JSON"),)
+    )
+    sim = UserSimulator(object(), scenario, [], tmp_path / "sim.jsonl")
+    assert sim._find_answer("Какой формат?") == "JSON"
+    assert sim._find_answer("Какой вид?") is None
+
+
+async def test_clarification_answered_by_list_match(tmp_path: Path) -> None:
+    from drcode.models import Clarification
+
+    manager = make_manager(tmp_path)
+    app = FakeApp(manager)
+    task = manager.create("t", "", kind=TaskKind.FEATURE)
+    task.status = TaskStatus.AWAITING_CLARIFICATION
+    # Paraphrase without the «формат» needle — only «стандарт» hits.
+    task.clarification = Clarification(question="Опишите корпоративный стандарт оформления цен?")
+    manager.storage.save(task)
+
+    scenario = make_scenario(
+        clarification_answers=(ClarificationAnswer(match=["формат", "стандарт"], answer="JSON"),)
+    )
+    sim = UserSimulator(app, scenario, [task], tmp_path / "sim.jsonl")
+    await run_until(sim, lambda: app.kicks)
+
+    assert task.status is TaskStatus.QUEUED
+    assert [e.text for e in task.pending_input] == ["JSON"]
+
+
 async def test_clarification_waits_for_agent_turn_to_finish(tmp_path: Path) -> None:
     """The answer must not land while the asker's agent run is live:
     send() would requeue the task and cancel the run before it persists

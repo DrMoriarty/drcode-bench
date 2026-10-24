@@ -8,7 +8,8 @@ very same calls the TUI itself makes: `manager.send`, nothing else; no
 
 1. **Auto-answer clarification.** A task in AWAITING_CLARIFICATION with
    `task.clarification` gets its answer from `scenario.clarification_answers`
-   (match by question substring when `match` is set, otherwise by order)
+   (match by question substring when `match` is set — a substring or an
+   any-of list of alternatives; otherwise by order)
    and `manager.send(task_id, answer)` — but only once the asker's agent
    turn has finished (`agent_running` is False): answering while the run
    is still winding down requeues the task and cancels the run before it
@@ -159,12 +160,15 @@ class UserSimulator:
             )
 
     def _find_answer(self, question: str) -> str | None:
-        """Answer lookup (§6): `match`ed answers win (substring of the
-        question, case-insensitive); when the scenario defines matchless
-        answers they are consumed in declaration order. Matched answers
-        that do NOT fit the question are never guessed with."""
+        """Answer lookup (§6): `match`ed answers win (any-of over the
+        question substrings, case-insensitive — the agent paraphrases the
+        same question run to run, so a scenario may list alternatives);
+        when the scenario defines matchless answers they are consumed in
+        declaration order. Matched answers that do NOT fit the question
+        are never guessed with."""
         answers = self.scenario.clarification_answers
-        matched = [a for a in answers if a.match and a.match.lower() in question.lower()]
+        q = question.lower()
+        matched = [a for a in answers if any(n.lower() in q for n in a.needles)]
         if matched:
             return matched[0].answer
         pool = [a for a in answers if not a.match]

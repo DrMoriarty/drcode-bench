@@ -83,10 +83,25 @@ class Followup:
 @dataclass(frozen=True)
 class ClarificationAnswer:
     """An auto-answer for AWAITING_CLARIFICATION (§6): matched by question
-    substring when `match` is given, otherwise by order."""
+    substring when `match` is given, otherwise by order.
 
-    match: str | None
+    `match` may be a single substring or a LIST of alternative substrings
+    (any-of match): the agent paraphrases the same question run to run
+    (s5 hit a paraphrase without the Latin «формат» — only the function
+    name format_price), so one narrow needle made the matcher brittle."""
+
+    match: str | list[str] | tuple[str, ...] | None
     answer: str
+
+    @property
+    def needles(self) -> tuple[str, ...]:
+        """The substrings any of which must appear in the question
+        (case-insensitive matching is done by the simulator)."""
+        if self.match is None:
+            return ()
+        if isinstance(self.match, str):
+            return (self.match,)
+        return tuple(self.match)
 
 
 @dataclass(frozen=True)
@@ -223,9 +238,26 @@ def _parse_clarification_answers(data: dict) -> tuple[ClarificationAnswer, ...]:
         answer = str(a.get("answer", "")).strip()
         if not answer:
             raise ScenarioError(f"clarification_answers[{i}]: answer is required")
-        match = a.get("match")
-        out.append(ClarificationAnswer(match=str(match).strip() if match else None, answer=answer))
+        out.append(ClarificationAnswer(match=_parse_match(a.get("match"), i), answer=answer))
     return tuple(out)
+
+
+def _parse_match(raw: object, idx: int) -> str | list[str] | tuple[str, ...] | None:
+    """`match` is a substring or an array of alternative substrings
+    (any-of); anything else is a loud load error, not a silently dead
+    matcher."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw.strip() or None
+    if isinstance(raw, list) and raw and all(isinstance(m, str) for m in raw):
+        needles = tuple(str(m).strip() for m in raw if str(m).strip())
+        if needles:
+            return needles
+    raise ScenarioError(
+        f"clarification_answers[{idx}]: match must be a substring or a "
+        f"non-empty array of substrings, got {raw!r}"
+    )
 
 
 def _parse_proxy(data: dict) -> ProxySpec | None:

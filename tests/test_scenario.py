@@ -18,7 +18,7 @@ REPO_SCENARIOS = Path(__file__).resolve().parents[1] / "scenarios"
 
 def _write_scenario(tmp_path: Path, body: str) -> Scenario:
     d = tmp_path / "sX"
-    d.mkdir()
+    d.mkdir(exist_ok=True)  # tests may write several variants in one tmp_path
     (d / "scenario.toml").write_text(textwrap.dedent(body), encoding="utf-8")
     return load_scenario(d)
 
@@ -119,3 +119,40 @@ def test_followups_and_answers_parsed(tmp_path: Path) -> None:
     )
     assert s.followups[0].when == "verification_failed"
     assert s.clarification_answers[0].answer == "JSON"
+
+
+def test_clarification_match_substring_and_anyof_list(tmp_path: Path) -> None:
+    """`match` accepts a single substring or an any-of array of
+    alternatives (s5: the agent paraphrases the ask run to run); other
+    shapes fail the load loudly."""
+    s = _write_scenario(
+        tmp_path,
+        """
+        timeout = 10
+        [[briefs]]
+        title = "t"
+        text = "do"
+
+        [[clarification_answers]]
+        match = ["формат", "стандарт", "оформления цен"]
+        answer = "JSON"
+        """,
+    )
+    a = s.clarification_answers[0]
+    assert a.needles == ("формат", "стандарт", "оформления цен")
+
+    for bad in ("match = 42", "match = []", 'match = ["", "  "]'):
+        with pytest.raises(ScenarioError, match="match must be"):
+            _write_scenario(
+                tmp_path,
+                f"""
+                timeout = 10
+                [[briefs]]
+                title = "t"
+                text = "do"
+
+                [[clarification_answers]]
+                {bad}
+                answer = "JSON"
+                """,
+            )

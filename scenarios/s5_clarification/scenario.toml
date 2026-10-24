@@ -25,7 +25,11 @@ ask_clarifying_question и дождитесь ответа пользовате�
 """
 
 [[clarification_answers]]
-match = "формат"
+# Any-of substrings over the question (case-insensitive): the model
+# paraphrases the ask run to run — e.g. run 20261024-130550 asked a
+# question containing only the Latin function name format_price and the
+# word «стандарт», no Cyrillic «формат».
+match = ["формат", "стандарт", "оформления цен"]
 answer = """
 Стандарт оформления цен: два знака после запятой; десятичный разделитель —
 запятая; разряды тысяч разделяются обычным пробелом; символ валюты (для
