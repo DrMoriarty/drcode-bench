@@ -53,10 +53,11 @@ settle-критерий был достигнут.
 
 S1 happy path · S2a bug→follow-up · S2b bug-report тестера · S3 компакция
 у кодера · S4 компакция у тестера · S5 clarification · S6 очередь ·
-S7 fault injection (опция) · S8 tester fix loop · S9 research-подсчёт.
+S7 fault injection (опция) · S8 tester fix loop · S9 research-подсчёт ·
+S10 research-факты (V2).
 
 Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**,
-**S6, S7 (этапы 5–6), S8 (fix-loop), S9 (research V1)**.
+**S6, S7 (этапы 5–6), S8 (fix-loop), S9 (research V1), S10 (research V2)**.
 
 ## Интерактивные сценарии этапа 3 (план §6/§7)
 
@@ -198,3 +199,39 @@ regex `^total: (\d+)$`, число совпадает с эталоном; task 
 одна задача kind=research, status=completed, ноль testing-раундов,
 verification=None; строже — `git log -- docs/report.md` непуст
 (git_commit_docs использован; git недоступен → проверка пропускается).
+
+## S10 — research-факты, посаженные в коде (research V2)
+
+Второй research-сценарий, вариант V2: в сид заранее посажены ровно три
+канонических факта, каждый однозначен, агент находит их чтением/grep'ом
+кода, checks сверяет точные кодовые идентификаторы:
+
+1. константа-сирота `PARCEL_VOLUME_LIMIT_L` (`shipping/rates.py`) —
+   единственное вхождение в `*.py` (имя не повторяется в
+   докстрингах/комментах);
+2. функции с одинаковым именем `balance` в двух модулях
+   (`ledger/totals.py`, `report/summary.py`);
+3. устаревший флаг `DETAILED_LEDGER`: определение в `config.py`,
+   единственное место использования — `report/render.py`.
+
+Бриф самодостаточен и НЕ называет ответы (модули/имена фактов 1–2 в
+нём отсутствуют); имя флага в п.3 — это вход поиска, без него пункт
+неотвечаем. Формат закреплён: `docs/findings.md`, по разделу на пункт,
+внутри — пути к файлам и имена символов дословно.
+
+Assertions checks.py (verdict механический): для каждого факта —
+needle по кодовым идентификаторам (путь к файлу И имя символа,
+case-insensitive substring) — парафраз имён невозможен, все три
+обязательны (защита от «одной счастливой grep-строки»); факты
+пересчитываются из исходников workspace (сирота — 1 вхождение, два
+`def balance`, флаг — 1 определение + 1 файл использования) — сид и
+проверка не разъедутся, а правку исходников research-агентом drcode
+запрещает write-лимитом; task JSON — одна kind=research COMPLETED,
+ноль testing-раундов, verification=None; строже — `git log --
+docs/findings.md` непуст. `[settle]` без `verification`.
+
+E2E: скриптованный research-агент `s10-research` в fake_gateway
+перечисляет сид через glob_files, делает ОДИН grep по альтернации трёх
+идентификаторов и собирает findings.md ИЗ СВОИХ tool-результатов
+(пути/символы парсятся из вывода grep — ничего о фактах в скрипте не
+захардкожено), затем git_commit_docs.

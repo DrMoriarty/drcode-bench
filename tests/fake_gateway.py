@@ -47,6 +47,14 @@ Served models (scripted per model id, see SCRIPTS):
   docs/report.md with write_file ("total: <number>" — the pinned format
   checks.py parses) and commits it via git_commit_docs (the research.md
   mandate for documentation assignments).
+- ``s10-research`` — the S10 scripted research agent (variant V2):
+  enumerates the seed with glob_files, then ONE grep_search over the
+  alternation of the three planted-fact identifiers (orphan constant,
+  duplicated "def balance", the deprecated flag), composes
+  docs/findings.md FROM THE GREP OUTPUT ITSELF (paths and symbols are
+  parsed out of the tool results — nothing about the facts is
+  hardcoded in the script; a drifted seed produces a findings.md that
+  checks.py rejects) and commits it via git_commit_docs.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -84,6 +92,7 @@ MODELS = (
     "s8-coder",
     "s8-tester",
     "s9-research",
+    "s10-research",
 )
 
 
@@ -654,6 +663,99 @@ def _s9_research_script(messages: list[dict]) -> dict:
     return _run_bash(S9_COUNT_CMD, "call_count")
 
 
+# -- S10: research over the planted facts (docs/findings.md + git_commit_docs) ----
+
+# The grep alternation covering ALL THREE planted facts (orphan constant,
+# duplicated function name, deprecated flag) — one search, like a real
+# research pass; the paths/symbols for findings.md are parsed out of the
+# tool RESULTS, never hardcoded here.
+S10_FACT_PATTERN = "PARCEL_VOLUME_LIMIT_L|def balance|DETAILED_LEDGER"
+
+
+def _tool_entries(messages: list[dict]) -> list[str]:
+    """Flat list of the run's tool-result entries.
+
+    A list return (grep_search / glob_files) reaches the gateway as the
+    JSON array produced by ToolReturnPart.model_response_str(); a str
+    return (run_bash etc.) arrives verbatim. Both shapes collapse into
+    one list of strings here."""
+    out: list[str] = []
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        content = str(m.get("content") or "")
+        try:
+            val = json.loads(content)
+        except json.JSONDecodeError:
+            val = [content]
+        if isinstance(val, list):
+            out.extend(str(item) for item in val)
+        else:
+            out.append(str(val))
+    return out
+
+
+def _grep_hits(entries: list[str], needle: str) -> list[tuple[str, str]]:
+    """(path, line text) pairs of grep entries 'path:line: text' whose
+    text or path contains `needle`."""
+    hits: list[tuple[str, str]] = []
+    for entry in entries:
+        path, lineno, text = entry.split(":", 2) if entry.count(":") >= 2 else ("", "", "")
+        if path.endswith(".py") and lineno.isdigit() and needle in text:
+            hits.append((path, text.strip()))
+    return hits
+
+
+def _s10_findings(messages: list[dict]) -> str:
+    """Compose docs/findings.md from the ACTUAL tool outputs: the
+    orphan/duplicate/flag facts come from the grep results the seed
+    produced — exactly the reading-based path the brief demands."""
+    entries = _tool_entries(messages)
+    orphan = _grep_hits(entries, "PARCEL_VOLUME_LIMIT_L")
+    dup = _grep_hits(entries, "def balance")
+    flag = _grep_hits(entries, "DETAILED_LEDGER")
+
+    lines = ["# Результаты исследования", ""]
+    lines += ["## 1. Неиспользуемая константа", ""]
+    for path, text in orphan:
+        name = text.partition("=")[0].strip()
+        lines.append(f"- `{path}` — `{name}` (единственное вхождение — определение)")
+    lines += ["", "## 2. Функции с одинаковым именем в разных модулях", ""]
+    for path, text in dup:
+        name = text.partition("(")[0].removeprefix("def").strip()
+        lines.append(f"- `{path}` — `{name}`")
+    lines += ["", "## 3. Использование флага DETAILED_LEDGER", ""]
+    for path, text in flag:
+        role = "определение" if text.startswith("DETAILED_LEDGER") else "использование"
+        lines.append(f"- `{path}` — {role}")
+    return "\n".join(lines) + "\n"
+
+
+def _s10_research_script(messages: list[dict]) -> dict:
+    """Research agent for S10 (variant V2): glob the seed layout, grep
+    the three fact identifiers in one alternation, write findings.md
+    composed from the grep results, commit via git_commit_docs (the
+    research.md mandate for documentation assignments). Stateless
+    decisions from the history, like the other scenario scripts."""
+    if _called(messages, "git_commit_docs"):
+        return _bash_end_run("Готово: findings.md записан в docs/ и закоммичен.")
+    if _called(messages, "write_file"):
+        return _call("git_commit_docs", {"message": "Add code research findings"}, "call_commit")
+    if _called(messages, "grep_search"):
+        return _call(
+            "write_file",
+            {"path": "docs/findings.md", "content": _s10_findings(messages)},
+            "call_report",
+        )
+    if _called(messages, "glob_files"):
+        return _call(
+            "grep_search",
+            {"pattern": S10_FACT_PATTERN, "include": "*.py"},
+            "call_grep",
+        )
+    return _call("glob_files", {"pattern": "**/*.py"}, "call_glob")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -673,6 +775,7 @@ SCRIPTS = {
     "s8-coder": _s8_coder_script,
     "s8-tester": _s8_tester_script,
     "s9-research": _s9_research_script,
+    "s10-research": _s10_research_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but

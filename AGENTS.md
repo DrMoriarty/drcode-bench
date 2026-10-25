@@ -61,7 +61,7 @@ Ruff/pyright are scoped to `bench/` + `tests/` — the `drcode/` submodule is ex
 - `matrix.toml`: providers + `[[combo]]` with exactly three roles (`coding`/`tester`/`compaction`). `api_key` supports `"env:NAME"` substitution. Combo keys like `coding_max_context_tokens = 3000` become per-model catalog overrides (used to force compaction without env vars). A model entry may set `model = "<wire-name>"` — the table key becomes a local alias for a real provider model (one provider model, several context caps); alias entries are materialized into virtual providers `<provider>--<alias>` at run prep, and generated configs carry only real wire names.
 - Scenario = `scenarios/<id>/` with `seed/` (copied into the run workspace), `scenario.toml` (briefs, followups, clarification_answers, timeout, `[settle]`), and `checks.py` (harness calls `python checks.py <workspace>`; exit 0 = green). Verdicts are always **mechanical** — the harness runs pytest in the workspace itself; never judge by agent words.
 - Task kinds in briefs: `feature`/`bug` only — `research` tasks never reach the tester.
-- Implemented scenarios: S1, S2a, S2b, S3, S4, S5, S6, S7, S8.
+- Implemented scenarios: S1, S2a, S2b, S3, S4, S5, S6, S7, S8, S9 (research V1), S10 (research V2).
 - S8 (`s8_fix_loop`) covers drcode's internal tester fix loop (upstream
   18b48f9): the brief's change breaks a dependent test BY DESIGN (the full
   seed suite is green before the edit — the contrast with s2a), the tester

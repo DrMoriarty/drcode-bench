@@ -111,6 +111,10 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+[providers.fake.models.s10-research]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -158,6 +162,9 @@ COMBOS = {
     # never called (research skips the tester, plan §7); the research role
     # serves the only task on its OWN scripted model.
     "s9_research_count": ("fake-coder", "fake-tester"),
+    # S10: same shape — the research role serves the only task; the
+    # coding/tester scripts stay idle for the whole run.
+    "s10_research_facts": ("fake-coder", "fake-tester"),
 }
 
 # The research model of each combo (defaults to the idle 4th-role model;
@@ -165,6 +172,7 @@ COMBOS = {
 # transcript is distinguishable from the coder's in model_log.jsonl).
 RESEARCH_MODELS = {
     "s9_research_count": "s9-research",
+    "s10_research_facts": "s10-research",
 }
 
 
@@ -602,6 +610,72 @@ async def test_s9_research_count_end_to_end(tmp_path: Path, monkeypatch, env_gua
     assert int(match.group(1)) == reference
     git_log = subprocess.run(
         ["git", "log", "--", "docs/report.md"],
+        cwd=run_dir / "workspace",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert git_log.returncode == 0 and git_log.stdout.strip(), git_log.stderr
+
+    # §6: the research loop closes without any user intervention.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["totals"]["n_testing_rounds"] == 0
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
+
+
+async def test_s10_research_facts_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S10 (variant V2 research): the agent finds the THREE planted seed
+    facts by reading/grepping the code (orphan constant, a function name
+    defined in two modules, the deprecated flag's usage sites) and
+    documents them in docs/findings.md. The scripted research agent
+    composes the findings from its OWN grep output — the identifiers
+    checks.py needles on come from the seed through the tool results,
+    not from the script. Research skips the tester entirely (plan §7):
+    no verification label, zero testing rounds, zero user interventions."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s10_research_facts")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+    (brief,) = report.tasks
+    assert brief["kind"] == "research"
+    assert brief["status"] == "completed"
+    # Research ends with mark_done: no tester, no verification label.
+    assert brief["verification"] is None
+    assert brief["n_testing_rounds"] == 0
+
+    # The research role SERVED the task on its OWN scripted model.
+    assert report.resolved_roles.get("research") == "fake/s10-research"
+    log_records = read_jsonl(run_dir / "model_log.jsonl")
+    assert any("s10-research@" in str(r.get("role")) for r in log_records)
+    assert not any("fake-coder@" in str(r.get("role")) for r in log_records)
+
+    # findings.md on disk answers all three facts by code identifiers
+    # (file path AND symbol name) — the same needles checks.py enforces;
+    # three facts at once rule out "one lucky grep line".
+    findings = (run_dir / "workspace" / "docs" / "findings.md").read_text(encoding="utf-8")
+    lowered = findings.lower()
+    for needle in (
+        "parcel_volume_limit_l",
+        "rates.py",
+        "totals.py",
+        "summary.py",
+        "balance",
+        "detailed_ledger",
+        "render.py",
+    ):
+        assert needle in lowered, findings
+
+    # The findings are in the git history (git_commit_docs committed the
+    # agent's own write_file edit).
+    git_log = subprocess.run(
+        ["git", "log", "--", "docs/findings.md"],
         cwd=run_dir / "workspace",
         capture_output=True,
         text=True,

@@ -1,0 +1,67 @@
+# S10 — research-сценарий, вариант V2: агент находит в сиде ЗАОДАНЕЕ
+# посаженные факты чтением/grep'ом кода, checks.py сверяет точные
+# кодовые идентификаторы. kind=research skips the tester entirely
+# (plan §7): research ends with mark_done, never receives a
+# verification label and never has testing rounds — therefore [settle]
+# carries NO verification key (research + verification="passed" is a
+# scenario-load error, bench/scenario.py); the default settle criterion
+# (§4) already requires the target task to end COMPLETED, and
+# checks.py asserts the rest mechanically.
+#
+# Три канонических факта (ровно N=3, каждый однозначен — сид
+# спроектирован так, что grep не даёт ложных совпадений):
+#   1. константа-сирота PARCEL_VOLUME_LIMIT_L (shipping/rates.py):
+#      единственное вхождение в *.py — сама строка определения
+#      (в докстрингах/комментах имя не повторяется);
+#   2. функции с одинаковым именем balance в ДВУХ модулях:
+#      ledger/totals.py и report/summary.py (grep '^def balance'
+#      даёт ровно два определения);
+#   3. устаревший флаг DETAILED_LEDGER: определение в config.py,
+#      единственное место использования — report/render.py.
+#
+# Бриф самодостаточен и НЕ содержит ответов: имена сироты и
+# дублирующихся функций в нём не названы (иначе сценарий вырождается
+# в копирование). Исключение — имя флага в п.3: это ВХОД поиска
+# («найдите места использования флага N»), без него пункт
+# неотвечаем; ответом остаются файлы мест использования.
+#
+# Формат вывода закреплён жёстко (docs/findings.md, по разделу на
+# пункт, внутри — пути к файлам и имена символов «как в коде»):
+# checks.py ищет needle'ы по кодовым идентификаторам (путь к файлу И
+# имя символа, case-insensitive substring) — агент процитирует
+# символы дословно, парафраз имён невозможен. Три факта сразу
+# защищают от «одной счастливой grep-строки» — все три обязательны.
+#
+# NB on the research agent's write limit (drcode research.md prompt):
+# write_file / edit_file / run_bash may only touch documentation
+# (*.md, AGENTS.md, docs/) — docs/findings.md fits. The brief tells
+# the agent to create the file with write_file so it lands in
+# task.edited_files and the mandatory git_commit_docs commits it —
+# the stricter "git log -- docs/findings.md non-empty" check of
+# checks.py relies on that.
+
+id = "s10_research_facts"
+timeout = 30  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Найдите в кодовой базе три факта и опишите их в docs/findings.md"
+kind = "research"
+text = """
+В репозитории небольшой пакет службы доставки: модуль config.py и
+пакеты ledger/ (двойная запись), report/ (отчёты), shipping/ (тарифы).
+
+Найдите в кодовой базе три факта:
+
+1. Константу, которая нигде не используется — нет ни одного обращения
+   к ней в коде: ни импорта, ни чтения (вхождение в строке её
+   собственного определения не считается использованием).
+2. Функции с одинаковым именем, определённые в разных модулях.
+3. Все места использования флага DETAILED_LEDGER.
+
+Оформите результат в docs/findings.md (создайте файл инструментом
+write_file): по разделу на каждый пункт, внутри раздела — пути к
+файлам и имена символов дословно так, как они записаны в коде.
+Способ поиска не важен (grep_search, glob_files, read_file, run_bash —
+как удобнее), но факты нужно установить чтением кода, а не догадкой.
+Исходные файлы не изменяйте.
+"""

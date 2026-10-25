@@ -113,3 +113,16 @@ coding     = "provider-a/qwen3-coder-30b"
 tester     = "provider-a/qwen3-coder-30b"
 compaction = "provider-b/qwen3-8b-small-ctx"
 compaction_max_context_tokens = 4096
+
+[[combo]]
+# Combo с research-ролью (upstream drcode 8d492baf — опциональная 4-я роль
+# AgentRole.RESEARCH): под kind=research задачи (S9/S10) назначается
+# отдельная модель — drcode маршрутизирует research-транскрипт в неё,
+# минуя кодера (research skips the tester, план §7). Роль опциональна:
+# комбо без ключа "research" остаются валидными, роль просто не
+# резолвится (см. bench/matrix.py OPTIONAL_ROLES, bench/env_setup.py).
+name       = "research-role"
+coding     = "provider-a/qwen3-coder-30b"
+tester     = "provider-b/qwen3-8b"
+compaction = "provider-b/qwen3-8b"
+research   = "provider-b/qwen3-8b"
