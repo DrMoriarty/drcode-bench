@@ -744,3 +744,194 @@ def test_run_preflight_subprocess_roundtrips_research(
     resolved = run_preflight_subprocess(paths, combo, matrix_path=research_matrix_file)
     assert resolved["research"] == "fake-a/researcher"
     assert resolved["coding"] == "fake-a/big-coder"
+
+
+# -- scenario `[context]` caps (plan §1.2): scenario > combo > catalog -----------
+
+CONTEXT_SCENARIO_TOML = """\
+id = "ctx_scenario"
+timeout = 1
+
+[context]
+coding = 1500
+
+[[briefs]]
+title = "t"
+kind = "feature"
+text = "do nothing"
+"""
+
+
+@pytest.fixture
+def context_scenario_dir(tmp_path: Path) -> Path:
+    """A minimal scenario whose scenario.toml carries a [context] section."""
+    scenario = tmp_path / "scenarios" / "ctx_scenario"
+    seed = scenario / "seed"
+    seed.mkdir(parents=True)
+    (seed / "main.py").write_text(SEED_MAIN, encoding="utf-8")
+    (scenario / "scenario.toml").write_text(CONTEXT_SCENARIO_TOML, encoding="utf-8")
+    return scenario
+
+
+def _write_scenario_toml(scenario_dir: Path, body: str) -> None:
+    (scenario_dir / "scenario.toml").write_text(body, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("[context]\nwat = 3000\n", "unknown role"),
+        ("[context]\ncoding = 0\n", "must be > 0"),
+        ("[context]\ncoding = -5\n", "must be > 0"),
+        ("[context]\ncoding = '3000'\n", "must be an integer"),
+        ("[context]\ncoding = true\n", "must be an integer"),
+        ("[context]\ncoding = 3.5\n", "must be an integer"),
+    ],
+)
+def test_scenario_context_rejects_bad_values(scenario_dir: Path, body: str, match: str) -> None:
+    """A typo'd [context] fails the scenario load loudly (the
+    KNOWN_SETTLE_KEYS principle), never a silent no-op."""
+    from bench.scenario import ScenarioError, load_scenario
+
+    base = (
+        'id = "x"\n'
+        "timeout = 1\n"
+        "\n[[briefs]]\n"
+        'title = "t"\n'
+        'kind = "feature"\n'
+        'text = "do nothing"\n'
+        "\n"
+    )
+    _write_scenario_toml(scenario_dir, base + body)
+    with pytest.raises(ScenarioError, match=match):
+        load_scenario(scenario_dir)
+
+
+def test_scenario_context_parses_overrides(scenario_dir: Path) -> None:
+    from bench.scenario import load_scenario
+
+    _write_scenario_toml(
+        scenario_dir,
+        'id = "x"\ntimeout = 1\n\n[context]\ncoding = 3000\ntester = 4000\n'
+        '\n[[briefs]]\ntitle = "t"\nkind = "feature"\ntext = "do nothing"\n',
+    )
+    sc = load_scenario(scenario_dir)
+    assert sc.max_context_overrides == (("coding", 3000), ("tester", 4000))
+    assert sc.max_context_override("coding") == 3000
+    assert sc.max_context_override("compaction") is None
+
+
+def test_effective_max_context_priority_scenario_beats_combo(
+    override_matrix_file: Path,
+) -> None:
+    """Priority (§1.2): scenario `[context]` → combo override → catalog."""
+    from bench.matrix import effective_max_context, max_context_source
+
+    providers, combos = load_matrix(override_matrix_file)
+    small = next(c for c in combos if c.name == "small-coding-ctx")
+    # small-coding-ctx: coding_max_context_tokens = 3000, catalog 32768.
+    assert effective_max_context(small, providers, "coding") == 3000
+    assert max_context_source(small, "coding") == "combo"
+    # The scenario cap wins over BOTH.
+    assert (
+        effective_max_context(small, providers, "coding", scenario_overrides=(("coding", 1500),))
+        == 1500
+    )
+    assert max_context_source(small, "coding", (("coding", 1500),)) == "scenario"
+    # An uncapped role falls through to the catalog value.
+    assert effective_max_context(small, providers, "tester") == 8192
+    assert max_context_source(small, "tester") == "catalog"
+
+
+def test_prepare_run_writes_scenario_override_into_catalog(
+    override_matrix_file: Path, context_scenario_dir: Path, tmp_path: Path
+) -> None:
+    """The scenario `[context]` cap travels into the generated catalog entry
+    (the layer providers.resolve reads the role's context from)."""
+    from bench.scenario import load_scenario
+
+    _, combos = load_matrix(override_matrix_file)
+    small = next(c for c in combos if c.name == "small-coding-ctx")
+    scenario = load_scenario(context_scenario_dir)
+    paths = prepare_run(
+        context_scenario_dir,
+        small,
+        tmp_path / "runs" / "sctx",
+        matrix_path=override_matrix_file,
+        scenario_overrides=scenario.max_context_overrides,
+    )
+    catalog = json.loads(paths.models_catalog.read_text(encoding="utf-8"))
+    fake_a = next(p for p in catalog["providers"] if p["name"] == "fake-a")
+    assert next(m for m in fake_a["models"] if m["id"] == "big-coder")["max_context_tokens"] == 1500
+
+
+def test_verify_resolution_preflight_roundtrips_scenario_overrides(
+    override_matrix_file: Path, context_scenario_dir: Path, tmp_path: Path
+) -> None:
+    """The pre-flight (in-process AND subprocess forms) validates the
+    scenario cap end-to-end: resolve() must return the scenario's small
+    context, and the subprocess spec carries the scenario section."""
+    from bench.scenario import load_scenario
+
+    _, combos = load_matrix(override_matrix_file)
+    small = next(c for c in combos if c.name == "small-coding-ctx")
+    scenario = load_scenario(context_scenario_dir)
+    paths = prepare_run(
+        context_scenario_dir,
+        small,
+        tmp_path / "runs" / "pfctx",
+        matrix_path=override_matrix_file,
+        scenario_overrides=scenario.max_context_overrides,
+    )
+    resolved = verify_resolution(
+        paths.workspace,
+        paths.config_home,
+        small,
+        matrix_path=override_matrix_file,
+        scenario_overrides=scenario.max_context_overrides,
+    )
+    assert resolved["coding"] == "fake-a/big-coder"
+    via_subprocess = run_preflight_subprocess(
+        paths,
+        small,
+        matrix_path=override_matrix_file,
+        scenario_overrides=scenario.max_context_overrides,
+    )
+    assert via_subprocess == resolved
+
+
+def test_materialize_scenario_override_conflict_gets_ctx_clone(
+    override_matrix_file: Path, tmp_path: Path
+) -> None:
+    """A scenario cap conflicting with another role's value on the SAME
+    model gets the `<provider>--ctx<N>` clone — the §1.2 conflict machinery
+    is reused as-is, only the cap source changes."""
+    from bench.env_setup import materialize_providers
+
+    providers, combos = load_matrix(override_matrix_file)
+    conflict = next(c for c in combos if c.name == "conflicting-overrides")
+    # Combo: coding=2000, compaction=5000 (same fake-b/small-8b); the
+    # scenario re-caps coding at 1500 — compaction keeps its 5000 clone.
+    materialized, refs = materialize_providers(
+        conflict, providers, scenario_overrides=(("coding", 1500),)
+    )
+    assert refs["coding"] == ("fake-b", "small-8b")
+    assert materialized["fake-b"].model("small-8b").max_context_tokens == 1500
+    clone_name = refs["compaction"][0]
+    assert clone_name.startswith("fake-b--ctx")
+    assert materialized[clone_name].model("small-8b").max_context_tokens == 5000
+
+
+def test_check_research_override_assigned(tmp_path: Path) -> None:
+    """`[context] research` on a combo without a research role would
+    silently never apply — a loud MatrixError naming both sides."""
+    from bench.matrix import MatrixError, check_research_override_assigned
+
+    matrix = tmp_path / "matrix.toml"
+    matrix.write_text(RESEARCH_MATRIX, encoding="utf-8")
+    _providers, combos = load_matrix(matrix)
+    without = next(c for c in combos if c.name == "without-research")
+    with_research = next(c for c in combos if c.name == "with-research")
+    check_research_override_assigned(with_research, (("research", 2048),), "scenario 'x'")
+    with pytest.raises(MatrixError, match="assigns no 'research' role"):
+        check_research_override_assigned(without, (("research", 2048),), "scenario 'x'")

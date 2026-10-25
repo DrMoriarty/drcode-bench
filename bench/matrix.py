@@ -18,6 +18,13 @@ tester, compaction. The fourth role, research, is OPTIONAL
 research role is absent from the generated selection and drcode itself
 falls back to the coding model (`providers.resolve_effective`) — every
 pre-research matrix.toml stays valid.
+
+Per-role `max_context_tokens` overrides of a combo
+(`<role>_max_context_tokens`) are DEPRECATED: the "small context"
+compaction pressure is scenario knowledge now — a `[context]` section in
+scenario.toml (bench.scenario) — and it WINS over the combo's overrides
+(priority: scenario → combo → catalog). The combo-level mechanism is
+kept for backwards compatibility; matrix.toml no longer uses it.
 """
 
 from __future__ import annotations
@@ -48,6 +55,11 @@ class ModelSpec:
     sends the catalog id to the provider verbatim, so an alias entry is
     materialized into a virtual provider by
     `env_setup.materialize_providers` (§1.2 mechanism reuse).
+
+    The alias mechanism is UNUSED by the repo's matrix.toml now: the
+    compaction pressure lives in the scenario's `[context]` section, which
+    needs no second catalog entry. Kept (with tests) as a generic
+    capability of the matrix parser.
     """
 
     provider: str
@@ -109,6 +121,11 @@ class Combo:
         coding   = "provider-a/model"
         research = "provider-a/researcher"   # optional
         coding_max_context_tokens = 3000
+
+    DEPRECATED: the compaction pressure is scenario knowledge now — the
+    `[context]` section of scenario.toml (bench.scenario), which WINS over
+    the combo's overrides (`effective_max_context` priority scenario →
+    combo → catalog). Keep this mechanism only for backwards compatibility.
     """
 
     name: str
@@ -179,7 +196,11 @@ def _parse_max_context_overrides(
     compaction gate reads its own role's resolved config). An override on
     an unassigned optional role would silently never apply (the role
     falls back to coding and reads coding's resolved config), so it is an
-    error instead."""
+    error instead.
+
+    DEPRECATED: the scenario's `[context]` section (bench.scenario) is the
+    working path — it wins over these combo overrides; kept for backwards
+    compatibility with existing matrices."""
     out: list[tuple[str, int]] = []
     for role in (*ROLES, *OPTIONAL_ROLES):
         value = raw.get(f"{role}_max_context_tokens")
@@ -197,14 +218,57 @@ def _parse_max_context_overrides(
     return tuple(out)
 
 
-def effective_max_context(combo: Combo, providers: dict[str, ProviderSpec], role: str) -> int:
-    """The max_context_tokens the role will actually run with: the combo's
-    override when set, otherwise the catalog value of the referenced model."""
+def max_context_source(
+    combo: Combo, role: str, scenario_overrides: tuple[tuple[str, int], ...] = ()
+) -> str:
+    """Where the role's max_context_tokens comes from: `"scenario"` (the
+    `[context]` section of scenario.toml), `"combo"` (a deprecated
+    `<role>_max_context_tokens` combo key) or `"catalog"` (the model's own
+    value). Same priority `effective_max_context` resolves with."""
+    if any(r == role for r, _ in scenario_overrides):
+        return "scenario"
+    if combo.max_context_override(role) is not None:
+        return "combo"
+    return "catalog"
+
+
+def effective_max_context(
+    combo: Combo,
+    providers: dict[str, ProviderSpec],
+    role: str,
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
+) -> int:
+    """The max_context_tokens the role will actually run with, by priority
+    (§1.2): the scenario's `[context]` cap → the combo's (deprecated)
+    per-role override → the catalog value of the referenced model."""
+    for r, value in scenario_overrides:
+        if r == role:
+            return value
     override = combo.max_context_override(role)
     if override is not None:
         return override
     provider_name, model_id = parse_ref(combo.ref(role), f"combo '{combo.name}' role {role}")
     return providers[provider_name].model(model_id).max_context_tokens
+
+
+def check_research_override_assigned(
+    combo: Combo, scenario_overrides: tuple[tuple[str, int], ...], where: str
+) -> None:
+    """A `[context] research` cap on a combo that assigns no research role
+    would silently never apply (the role falls back to coding and reads
+    coding's resolved config) — a loud error instead, at the point that
+    knows BOTH sides: the planning (`bench.runner.plan_jobs`) and the
+    single-run entry (`bench.run_one.main`). The scenario load itself
+    CANNOT do this check — it does not know the combo."""
+    if not any(role == "research" for role, _ in scenario_overrides):
+        return
+    if combo.research is None:
+        raise MatrixError(
+            f"{where}: [context] research is set, but combo '{combo.name}' "
+            "assigns no 'research' role — the cap would silently never "
+            "apply (the role falls back to coding); assign research in the "
+            "combo or drop the cap"
+        )
 
 
 def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:

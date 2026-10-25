@@ -38,7 +38,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .matrix import MatrixError, get_combo, load_matrix
+from .matrix import (
+    MatrixError,
+    check_research_override_assigned,
+    get_combo,
+    load_matrix,
+)
 from .scenario import Scenario, ScenarioError, load_scenario
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -176,6 +181,20 @@ def plan_jobs(
             scenarios.append(load_scenario(scenarios_root / sid))
         except ScenarioError as e:
             raise RunnerError(f"scenario '{sid}': {e}") from None
+
+    # A `[context] research` cap (§1.2) on a combo that assigns no research
+    # role would silently never apply (the role falls back to coding) —
+    # the planning knows BOTH sides, so it fails loudly here instead of
+    # burning run slots on a run whose scenario factor never fired. The
+    # scenario load cannot do this check (it does not know the combo).
+    for sc in scenarios:
+        for combo in combos:
+            try:
+                check_research_override_assigned(
+                    combo, sc.max_context_overrides, f"scenario '{sc.id}'"
+                )
+            except MatrixError as e:
+                raise RunnerError(str(e)) from None
 
     jobs = [
         Job(

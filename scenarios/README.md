@@ -36,6 +36,17 @@ pytest в workspace**, вердикт не строится на словах а
 - `[settle]` — сценарно-специфичная часть settle-критерия (§4):
   `verification = "passed"` требует, чтобы целевые задачи завершились
   с меткой PASSED тестировщика (`"any"` — метка не проверяется).
+- `[context]` (опция, план §1.2) — пер-ролевые капы `max_context_tokens`
+  ЭТОГО сценария: `coding = 3000`, `tester = 3000`, `compaction = 4096`,
+  `research = ...`. «Как вызвать компакцию» — знание сценария (прецедент
+  — `[proxy]` у S7), а не матрицы: кап попадает в entry каталога
+  models.json и ПОБЕЖДАЕТ комбо при конфликте (приоритет сценарий →
+  combo → каталог; пер-ролевые оверрайды combo
+  `<роль>_max_context_tokens` — deprecated). Кап на research-роль комбо
+  без research — громкая ошибка планирования (`plan_jobs` /
+  `run_one.main`), не тихий no-op. Источник эффективного капа роли
+  фиксируется в `result.json.resolved_context_sources`
+  (`scenario|combo|catalog`).
 
 ## checks.py
 
@@ -133,12 +144,15 @@ S11 (research V3), S12 (research V4), S13 (research V5, compound)**.
 
 - «Маленький контекст» ставится **целевой роли** (план §1.2, drcode ≥ 0.5.0 —
   пер-ролевое разрешение моделей): S3 — кодинговой модели (её mid-run/
-  turn-boundary гейты), S4 — модели тестера (её mid-round гейт). Варианты:
-  отдельный id модели в каталоге (`qwen3-8b-small-ctx`) либо переопределение
-  на роль из combo — `<роль>_max_context_tokens = 3000` в matrix.toml
-  (попадает в entry каталога models.json, который перекрывает flat config
-  для роли; env `DRCODE_MAX_CONTEXT_TOKENS` не используется — flat-config
-  fallback в 0.5.0 удалён — и в прогоне всё равно вычищается).
+  turn-boundary гейты), S4 — модели тестера (её mid-round гейт). Кап —
+  часть сценария: секция `[context]` в scenario.toml
+  (`coding = 3000` / `tester = 3000`), попадает в entry каталога
+  models.json, который перекрывает flat config для роли (env
+  `DRCODE_MAX_CONTEXT_TOKENS` не используется — flat-config fallback в
+  0.5.0 удалён — и в прогоне всё равно вычищается). Сценарный кап
+  побеждает комбо (deprecated пер-ролевые оверрайды combo), поэтому S3/S4
+  идут против ЛЮБОЙ комбо матрицы — сервисных комбо/алиасов в matrix.toml
+  больше нет.
 - S3: сид — каталог `glossary/` из 18 модулей, brief велит прочитать
   каждый; assertions checks.py: событие «Context compacted», compaction
   start (mid-run pause или turn boundary), `COMPACTION_SUMMARY_PREFIX`
@@ -158,7 +172,9 @@ S11 (research V3), S12 (research V4), S13 (research V5, compound)**.
   failure компакции never fatal: gate отключается, ран продолжается
   несжатым; отчёт помечает это состояние).
 - Деградационная combo «слабого компактизатора» — `degradation-weak-compactor`
-  в matrix.toml (ручная проверка); полный матричный раннер — этап 5.
+  в matrix.toml (ручная проверка; легитимный матричный фактор — слабая
+  МОДЕЛЬ компактизатора, не сценарный кап контекста); полный матричный
+  раннер — этап 5.
 
 Этапы 4–5 плана (§12) наполняют остальные сценарии и матричный раннер.
 

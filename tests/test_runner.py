@@ -113,6 +113,23 @@ def test_plan_jobs_unknown_combo_fails(bench_env) -> None:
         plan_jobs(matrix, scenarios, "all", "nope", repeats=1)
 
 
+def test_plan_jobs_rejects_research_context_without_research_role(bench_env) -> None:
+    """A scenario `[context] research` cap (§1.2) on a combo that assigns no
+    research role would silently never apply (the role falls back to
+    coding) — the planning knows both sides and fails loudly instead of
+    burning run slots."""
+    matrix, scenarios = bench_env
+    d = scenarios / "s3_ctx"
+    d.mkdir(parents=True)
+    (d / "scenario.toml").write_text(
+        SCENARIO_TOML + "\n[context]\nresearch = 2048\n", encoding="utf-8"
+    )
+    (d / "seed").mkdir()
+    (d / "seed" / "f.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(RunnerError, match="assigns no 'research' role"):
+        plan_jobs(matrix, scenarios, "s3_ctx", "combo-a", repeats=1)
+
+
 # -- infra vs content classification ----------------------------------------------
 
 

@@ -111,21 +111,27 @@ def subprocess_env(config_home: Path, *, home: Path | None = None) -> dict[str, 
 def materialize_providers(
     combo: Combo,
     providers: dict[str, ProviderSpec],
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
 ) -> tuple[dict[str, ProviderSpec], dict[str, tuple[str, str]]]:
     """Apply two catalog-level transformations (§1.2/§8) to the combo's
     providers and return the materialized providers plus the effective
     role refs.
 
-    ALIAS entries (§8, `model` field in matrix.toml): drcode sends the
-    catalog id to the provider verbatim, so a table key that is only a
-    local alias cannot stay in the catalog. It is materialized into the
-    virtual-provider form — a new provider `<provider>--<alias>` with the
-    same base_url/api_key and a single entry `id = <real wire name>`
-    carrying the alias's caps — and the role ref is rewritten
-    `provider/alias` → `<provider>--<alias>/<wire>`. The generated
-    catalog then contains only names the provider actually serves
-    (recorder/model_log show the real model); roles sharing an alias
-    share one virtual provider.
+    `scenario_overrides` are the scenario's `[context]` caps
+    (bench.scenario, §1.2) — they WIN over the combo's own (deprecated)
+    per-role overrides and the catalog values (`effective_max_context`
+    priority: scenario → combo → catalog).
+
+    ALIAS entries (§8, `model` field in matrix.toml; unused by the repo's
+    matrix.toml now): drcode sends the catalog id to the provider
+    verbatim, so a table key that is only a local alias cannot stay in the
+    catalog. It is materialized into the virtual-provider form — a new
+    provider `<provider>--<alias>` with the same base_url/api_key and a
+    single entry `id = <real wire name>` carrying the alias's caps — and
+    the role ref is rewritten `provider/alias` →
+    `<provider>--<alias>/<wire>`. The generated catalog then contains only
+    names the provider actually serves (recorder/model_log show the real
+    model); roles sharing an alias share one virtual provider.
 
     Per-role `max_context_tokens` overrides (§1.2):
 
@@ -158,7 +164,9 @@ def materialize_providers(
     for role in role_order:
         provider_name, model_id = parse_ref(combo.ref(role), f"combo '{combo.name}' role {role}")
         refs[role] = (provider_name, model_id)
-        ctxs[role] = effective_max_context(combo, providers, role)
+        ctxs[role] = effective_max_context(
+            combo, providers, role, scenario_overrides=scenario_overrides
+        )
 
     out = {name: providers[name] for name in providers}
 
@@ -371,6 +379,7 @@ def prepare_run(
     agents_md: Path | None = None,
     proxy_base: str | None = None,
     exists_ok: bool = False,
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
 ) -> RunPaths:
     """Create the full run tree for one (scenario, combo) pair and return
     its layout (§3).
@@ -394,6 +403,10 @@ def prepare_run(
     to the real upstream (bench.proxy.ProxyApp.route). The pre-flight
     (`verify_resolution`) applies the same rewrite, so it validates the
     exact configuration the run will use.
+
+    `scenario_overrides`: the scenario's `[context]` caps
+    (bench.scenario, §1.2) — written INTO the generated catalog entries
+    (scenario → combo → catalog priority, see `materialize_providers`).
     """
     scenario_dir = Path(scenario_dir)
     run_dir = Path(run_dir)
@@ -422,10 +435,13 @@ def prepare_run(
     # 2. user-level catalog of this combo, with the per-role
     #    max_context_tokens overrides written INTO the catalog entries
     #    (§1.2: the catalog entry beats the flat config for a role; §13:
-    #    never via DRCODE_* env). Conflicting overrides on one model get a
+    #    never via DRCODE_* env). Scenario `[context]` caps beat the
+    #    combo's overrides; conflicting overrides on one model get a
     #    virtual provider clone; `refs` holds the effective role refs.
     used_providers = _providers_for_combo(combo, providers, matrix_path)
-    catalog_providers, refs = materialize_providers(combo, used_providers)
+    catalog_providers, refs = materialize_providers(
+        combo, used_providers, scenario_overrides=scenario_overrides
+    )
     if proxy_base:
         # §9: every base_url the run sees goes through the proxy; the
         # real endpoints stay in the matrix file only.
@@ -520,6 +536,7 @@ def verify_resolution(
     providers: dict[str, ProviderSpec] | None = None,
     matrix_path: Path | None = None,
     proxy_base: str | None = None,
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
 ) -> dict[str, str]:
     """Pre-flight: resolve each ASSIGNED role against the generated config
     and assert the expected model AND the expected max_context_tokens (the
@@ -530,16 +547,19 @@ def verify_resolution(
     Uses `drcode.providers.resolve()` — the same precedence (env >
     project models > catalog defaults) the run will see;
     the expected refs/values come from `materialize_providers`, i.e. the
-    combo's per-role overrides included. With `proxy_base` set (§9) the
-    expected base_url is the proxy-routed one — the exact configuration
-    the run was generated with (`prepare_run(proxy_base=...)`).
+    scenario's `[context]` caps and the combo's per-role overrides
+    included. With `proxy_base` set (§9) the expected base_url is the
+    proxy-routed one — the exact configuration the run was generated with
+    (`prepare_run(proxy_base=...)`).
     """
     if providers is None:
         if matrix_path is None:
             matrix_path = Path(__file__).resolve().parents[1] / "matrix.toml"
         providers, _ = load_matrix(matrix_path)
 
-    catalog_providers, refs = materialize_providers(combo, providers)
+    catalog_providers, refs = materialize_providers(
+        combo, providers, scenario_overrides=scenario_overrides
+    )
     if proxy_base:
         from .proxy import apply_proxy_base
 
@@ -593,12 +613,16 @@ def run_preflight_subprocess(
     providers: dict[str, ProviderSpec] | None = None,
     matrix_path: Path | None = None,
     proxy_base: str | None = None,
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
 ) -> dict[str, str]:
     """Pre-flight in a FRESH interpreter with the sanitized env.
 
     This is the form the real run uses: the run subprocess sees
     XDG_CONFIG_HOME=<config-home> at `drcode.config` import time, so the
     check reproduces the import-time binding exactly (no monkeypatching).
+    The spec carries BOTH override sources — the combo's (deprecated) and
+    the scenario's `[context]` caps — so the child reconstructs the same
+    effective priority (scenario → combo → catalog).
     """
     payload = json.dumps(
         {
@@ -613,6 +637,9 @@ def run_preflight_subprocess(
                 "max_context_overrides": [
                     [role, value] for role, value in combo.max_context_overrides
                 ],
+            },
+            "scenario": {
+                "max_context_overrides": [[role, value] for role, value in scenario_overrides],
             },
             "matrix_path": str(matrix_path) if matrix_path else None,
             "proxy_base": proxy_base,
@@ -649,6 +676,12 @@ def _preflight_main() -> int:
             (role, int(value)) for role, value in spec["combo"].get("max_context_overrides") or ()
         ),
     )
+    # The scenario's `[context]` caps (§1.2) — they beat the combo's own
+    # overrides inside verify_resolution/materialize_providers.
+    scenario_overrides = tuple(
+        (role, int(value))
+        for role, value in (spec.get("scenario") or {}).get("max_context_overrides") or ()
+    )
     matrix_path = Path(spec["matrix_path"]) if spec.get("matrix_path") else None
     proxy_base = spec.get("proxy_base") or None
     # XDG_CONFIG_HOME of this process IS the run's config-home; drcode.config
@@ -659,6 +692,7 @@ def _preflight_main() -> int:
         combo,
         matrix_path=matrix_path,
         proxy_base=proxy_base,
+        scenario_overrides=scenario_overrides,
     )
     print(json.dumps(resolved))
     return 0

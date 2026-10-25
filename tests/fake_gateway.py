@@ -1057,21 +1057,28 @@ SCRIPTS = {
 USAGE = {"prompt_tokens": 120, "completion_tokens": 24, "total_tokens": 144}
 
 # S3/S4: the gateway INFLATES the reported usage of these models so the
-# compaction gates of drcode really trip in the e2e runs (plan §1.2): the
-# prompt_tokens grow with every tool result in the history, crossing 80%
-# of the matrix's max_context_tokens (100000 → 80000) after a few reads /
-# fat run_bash outputs. The read_file budget guard uses the same numbers,
-# so the scripted models stop reading right before the guard would refuse.
-INFLATED_BASE = 9000
-INFLATION_PER_TOOL_RESULT = {"s3-coder": 13000, "s4-tester": 26000}
+# compaction gates of drcode really trip in the e2e runs (plan §1.2). The
+# caps come from the scenario's `[context]` section (3000 for the
+# compacted role — coding for S3, tester for S4), so the inflation is
+# tuned to THAT window: the threshold is 80% × 3000 = 2400 tokens, the
+# hard limit 97% × 3000 = 2910. usage(n) = 300 + 1100·n (n = tool results
+# in the history) crosses 2400 at n = 3 — the gate trips there — and
+# stays under the hard limit; the post-compaction continuation turn
+# carries NO tool results (the history is a summary), so it reports 300 —
+# back under the threshold, and the compacted run settles instead of
+# looping pause→compact forever. The read_file budget guard reads the
+# same numbers, so at the trip point a further read is refused (a neutral
+# tool result — the gate handles the window).
+INFLATED_USAGE = {"s3-coder": (300, 1100), "s4-tester": (300, 1100)}
 
 
 def _usage_for(model: str, messages: list[dict]) -> dict:
-    per_tool = INFLATION_PER_TOOL_RESULT.get(model)
-    if per_tool is None:
+    spec = INFLATED_USAGE.get(model)
+    if spec is None:
         return USAGE
+    base, per_tool = spec
     n_tools = sum(1 for m in messages if m.get("role") == "tool")
-    prompt = INFLATED_BASE + per_tool * n_tools
+    prompt = base + per_tool * n_tools
     return {
         "prompt_tokens": prompt,
         "completion_tokens": 24,

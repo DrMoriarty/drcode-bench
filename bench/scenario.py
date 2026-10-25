@@ -22,6 +22,12 @@ scenario.toml:
                                 # criterion (§4); see bench/settle.py
     verification = "passed"
 
+    [context]                   # per-role max_context_tokens caps for THIS
+    coding = 3000               # scenario (§1.2) — e.g. force compaction on
+                                # the coding model. Beats the combo's own
+                                # <role>_max_context_tokens overrides
+                                # (deprecated) and the catalog value.
+
     [[followups]]               # consumed by the user simulator (§6)
     ...
 
@@ -51,6 +57,14 @@ ALLOWED_KINDS = ("feature", "bug", "research")
 # invent new ones silently — a typo'd key would otherwise just be ignored
 # and the run would settle green without the intended assertion.
 KNOWN_SETTLE_KEYS = ("verification",)
+
+# Roles a scenario's `[context]` section may cap. `research` is allowed here
+# but NOT validated against the combo at load time — the scenario does not
+# know which combo it will run with; that cross-check (a research cap on a
+# combo that assigns no research role would silently never apply) happens at
+# planning time (bench.runner.plan_jobs) and for single runs in
+# bench.run_one.main (bench.matrix.check_research_override_assigned).
+CONTEXT_ROLES = ("coding", "tester", "compaction", "research")
 
 
 class ScenarioError(ValueError):
@@ -137,10 +151,24 @@ class Scenario:
     followups: tuple[Followup, ...] = ()
     clarification_answers: tuple[ClarificationAnswer, ...] = ()
     proxy: ProxySpec | None = None  # §9: fault-injection proxy setup
+    # Per-role max_context_tokens caps of the `[context]` section (§1.2):
+    # compaction scenarios force a SMALL context on the compacted role
+    # (S3 → coding, S4 → tester) as part of the scenario itself — no
+    # service combos in matrix.toml needed. Priority over the combo's own
+    # (deprecated) per-role overrides and the catalog value.
+    max_context_overrides: tuple[tuple[str, int], ...] = ()
 
     @property
     def timeout_seconds(self) -> float:
         return self.timeout_min * 60.0
+
+    def max_context_override(self, role: str) -> int | None:
+        """The scenario's `max_context_tokens` cap for a role (None = the
+        scenario does not cap it)."""
+        for r, value in self.max_context_overrides:
+            if r == role:
+                return value
+        return None
 
     @property
     def checks_file(self) -> Path:
@@ -302,6 +330,34 @@ def _parse_proxy(data: dict) -> ProxySpec | None:
     return spec
 
 
+def _parse_max_context_overrides(data: dict) -> tuple[tuple[str, int], ...]:
+    """The optional `[context]` section (§1.2): per-role `max_context_tokens`
+    caps for this scenario — the "how to trigger compaction" knowledge lives
+    in the scenario itself (the `[proxy]` precedent, §9), not in service
+    combos of matrix.toml. Same loud-error principle as KNOWN_SETTLE_KEYS:
+    an unknown role or a non-positive/non-integer value fails the scenario
+    load instead of being silently ignored. The override travels into
+    `env_setup.materialize_providers`, which writes the cap into the
+    generated catalog entry of the role's model (§1.2)."""
+    raw = data.get("context")
+    if not raw:
+        return ()
+    if not isinstance(raw, dict):
+        raise ScenarioError("[context] must be a table of role = max_context_tokens")
+    out: list[tuple[str, int]] = []
+    for role, value in raw.items():
+        if role not in CONTEXT_ROLES:
+            raise ScenarioError(f"[context]: unknown role {role!r} — known roles: {CONTEXT_ROLES}")
+        # bool is an int subclass in Python — reject it explicitly: a
+        # `coding = true` cap is a typo, not a limit.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ScenarioError(f"[context] {role}: must be an integer (tokens), got {value!r}")
+        if value <= 0:
+            raise ScenarioError(f"[context] {role}: must be > 0, got {value}")
+        out.append((role, int(value)))
+    return tuple(out)
+
+
 def load_scenario(path: Path) -> Scenario:
     """Parse `scenarios/<id>/scenario.toml` into a `Scenario`."""
     path = Path(path)
@@ -335,6 +391,7 @@ def load_scenario(path: Path) -> Scenario:
         followups=_parse_followups(data),
         clarification_answers=_parse_clarification_answers(data),
         proxy=_parse_proxy(data),
+        max_context_overrides=_parse_max_context_overrides(data),
     )
 
 

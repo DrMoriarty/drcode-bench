@@ -77,6 +77,9 @@ max_context_tokens = 100000
 max_tokens = 8192
 
 [providers.fake.models.s3-coder]
+# The CATALOG context is big on purpose: the small limit (3000) must reach
+# the coding ROLE via the scenario's [context] section — not via the
+# catalog entry (§1.2, scenario → combo → catalog priority).
 max_context_tokens = 100000
 max_tokens = 8192
 
@@ -84,10 +87,8 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
-# The S4 tester's CATALOG context is big on purpose: the small limit must
-# reach the tester ROLE via the combo's per-role override
-# (tester_max_context_tokens), not via the shared catalog entry — that is
-# the drcode ≥ 0.5.0 per-role placement the scenario verifies (§1.2).
+# Same for the S4 tester: the catalog entry stays big; the scenario's
+# [context] cap (3000) is what both tester gates must divide by.
 [providers.fake.models.s4-tester]
 max_context_tokens = 1000000
 max_tokens = 8192
@@ -154,23 +155,13 @@ research   = "fake/{research}"
 {extra}"""
 
 # Per-role max_context_tokens overrides appended to the generated combo —
-# the small limit travels in the catalog entry of the ROLE it must pressure
-# (§1.2, drcode ≥ 0.5.0: each compaction gate reads its own role's config).
+# DEPRECATED source (§1.2): the working path is the scenario's [context]
+# section. S4 keeps a COMBO override (50000) on purpose: the scenario's
+# [context] tester = 3000 must WIN over it, so the e2e proves the
+# scenario → combo priority on the real pipeline (a regression to
+# combo-wins would resolve tester to 50000 and fail the assertions
+# below).
 COMBO_EXTRA_TOML = {
-    # S4: the tester's catalog context is 1000000 — the override on the
-    # tester ROLE is what BOTH tester gates must divide by: the pause gate
-    # and the resume-path compaction decision in
-    # _maybe_compact_tester_round (upstream 5129872 made the latter read
-    # AgentRole.TESTER too; previously it divided by the CODING config,
-    # which livelocked pause→resume-without-compaction when the limits
-    # differed). The coding role keeps its 100000 catalog entry on purpose:
-    # if any tester gate regresses to the coding config, the inflated
-    # usage never crosses ITS threshold and the tester round pauses
-    # forever — the e2e then fails on the settle timeout instead of
-    # silently passing.
-    # 50000 (not smaller): the inflated usage stays OVER the threshold after
-    # the compaction too (the verdict round still carries a tool result), so
-    # a tiny limit would loop pause→compact forever instead of settling.
     "s4_compaction_tester": "tester_max_context_tokens = 50000",
 }
 
@@ -180,8 +171,8 @@ COMBOS = {
     "s5_clarification": ("s5-coder", "s5-tester"),
     # S3/S4: the compaction lives on the CODER side (S3) / the TESTER side
     # (S4); the inflated gateway usage (fake_gateway._usage_for) trips the
-    # real gates of drcode (S3 on the 100000-token coding context, S4 on
-    # the 30000-token tester override).
+    # real gates of drcode (both on the scenario's [context] cap of 3000 —
+    # coding for S3, tester for S4).
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
     "s7_fault_injection": ("s7-coder", "s7-tester"),
@@ -379,7 +370,9 @@ async def test_s3_compaction_coder_end_to_end(tmp_path: Path, monkeypatch, env_g
     """S3 (plan §7, stage 4): the coder's compaction on a context the
     gateway keeps near-full — real mid-run/turn-boundary gate, real
     summary, real continuation turn; checks.py green; metrics carry the
-    compaction block."""
+    compaction block. The small context comes from the scenario's
+    `[context]` section (§1.2) — the catalog entry of s3-coder stays big
+    on purpose, so the run proves the scenario → catalog priority too."""
     report = await _run_scenario(tmp_path, monkeypatch, "s3_compaction_coder")
     run_dir = Path(report.run_dir)
 
@@ -405,8 +398,12 @@ async def test_s3_compaction_coder_end_to_end(tmp_path: Path, monkeypatch, env_g
     assert task["transcript"]["n_user_prompts"] >= 1
     assert not comp["repeat_compaction"]
 
-    # The harness recorded the effective per-role context limits (§1.2).
-    assert report.resolved_context_tokens["coding"] == 100000
+    # The harness recorded the effective per-role context limits (§1.2)
+    # and WHERE each limit came from: the coding role runs on the
+    # scenario's [context] cap (3000, catalog entry 100000 untouched).
+    assert report.resolved_context_tokens["coding"] == 3000
+    assert report.resolved_context_sources["coding"] == "scenario"
+    assert report.resolved_context_sources["tester"] == "catalog"
 
     # §10: the report generation must not choke on compaction artifacts.
     from bench.report import generate_report
@@ -418,10 +415,12 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     """S4 (plan §7, stage 4): the tester's mid-round compaction — the
     round is rewritten in place (summary in tester_messages[-1]), the
     verdict is set, checks.py green. The small context reaches the TESTER
-    role via the combo's per-role override (drcode ≥ 0.5.0: the mid-round
-    gate divides by the tester model's resolved max_context_tokens), and
-    the threshold-source classification (§1.2) must name 'tester' — a
-    'coding' source would be a regression."""
+    role via the scenario's `[context]` cap (§1.2), which must WIN over
+    the combo's per-role override (50000 — see COMBO_EXTRA_TOML): the
+    mid-round gate divides by the tester model's resolved
+    max_context_tokens (drcode ≥ 0.5.0), and the threshold-source
+    classification (§1.2) must name 'tester' — a 'coding' source would be
+    a regression."""
     report = await _run_scenario(tmp_path, monkeypatch, "s4_compaction_tester")
     run_dir = Path(report.run_dir)
 
@@ -433,13 +432,16 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     assert brief["verification"] == "Verified successfully"
     assert brief["n_testing_rounds"] == 1
 
-    # §1.2: the small limit landed on the tester ROLE via the combo
-    # override (the catalog entry of s4-tester stays big — the override is
-    # what carried it), while coding keeps its untouched catalog limit —
-    # the two roles must resolve DIFFERENT contexts now that the resume
-    # path reads the tester config too (upstream 5129872).
+    # §1.2: the small limit landed on the tester ROLE via the scenario's
+    # [context] cap — 3000, beating BOTH the combo's 50000 override and
+    # the s4-tester catalog entry (1000000) — while coding keeps its
+    # untouched catalog limit — the two roles must resolve DIFFERENT
+    # contexts now that the resume path reads the tester config too
+    # (upstream 5129872).
     assert report.resolved_context_tokens["coding"] == 100000
-    assert report.resolved_context_tokens["tester"] == 50000
+    assert report.resolved_context_tokens["tester"] == 3000
+    assert report.resolved_context_sources["tester"] == "scenario"
+    assert report.resolved_context_sources["coding"] == "catalog"
 
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     (task,) = metrics["tasks"]

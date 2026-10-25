@@ -6,7 +6,9 @@ Inside this process:
 
     1. the run tree is prepared (bench.env_setup.prepare_run, §3): the
        seed of the scenario is copied into `workspace/`, the combo's
-       models.json / drcode.json / settings.json are generated;
+       models.json / drcode.json / settings.json are generated — with the
+       scenario's `[context]` caps (§1.2) written into the catalog entries
+       (scenario → combo → catalog priority);
     2. the process environment is sanitized IN PLACE and BEFORE drcode is
        imported (drcode.config binds XDG_CONFIG_HOME at import time; the
        repo `.env` of drcode leaks through pydantic-settings — only a
@@ -57,7 +59,14 @@ from pathlib import Path
 from typing import Any
 
 from .env_setup import EnvSetupError, prepare_run, subprocess_env
-from .matrix import MatrixError, get_combo, load_matrix
+from .matrix import (
+    MatrixError,
+    check_research_override_assigned,
+    effective_max_context,
+    get_combo,
+    load_matrix,
+    max_context_source,
+)
 from .scenario import Scenario, ScenarioError, load_scenario
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -87,11 +96,16 @@ class RunReport:
     checks_ok: bool | None = None  # None = scenario has no checks.py
     checks_output: str = ""
     resolved_roles: dict[str, str] = field(default_factory=dict)
-    # Effective max_context_tokens per role (combo overrides applied,
-    # §1.2): S3/S4 assert the small coding context actually reached the
-    # role — the pre-flight (verify_resolution) fails the run otherwise,
-    # this record keeps the fact in the artifacts.
+    # Effective max_context_tokens per role (scenario `[context]` caps and
+    # combo overrides applied, §1.2): S3/S4 assert the small context
+    # actually reached the role — the pre-flight (verify_resolution) fails
+    # the run otherwise, this record keeps the fact in the artifacts.
     resolved_context_tokens: dict[str, int] = field(default_factory=dict)
+    # Where each role's effective context comes from: "scenario" (the
+    # `[context]` section of scenario.toml), "combo" (a deprecated
+    # <role>_max_context_tokens key) or "catalog" — observability for the
+    # scenario → combo → catalog priority of §1.2.
+    resolved_context_sources: dict[str, str] = field(default_factory=dict)
     # §9 proxy mode: when the run went through the fault-injection proxy,
     # the artifacts must say so (log path, base address, injected faults).
     proxy_log: str | None = None
@@ -250,7 +264,8 @@ async def _run_with_optional_proxy(
     """Everything after the proxy is up (§4 skeleton steps 1–7)."""
     # 1. Run tree (§3): seed copy, models.json, drcode.json, settings.json
     #    (stall_nudge=never, completed_retention=never), git init. With a
-    #    proxy (§9) every generated base_url points at it.
+    #    proxy (§9) every generated base_url points at it. The scenario's
+    #    `[context]` caps (§1.2) travel into the generated catalog.
     paths = prepare_run(
         scenario.dir,
         combo,
@@ -258,6 +273,7 @@ async def _run_with_optional_proxy(
         matrix_path=matrix_path,
         exists_ok=True,
         proxy_base=report.proxy_base,
+        scenario_overrides=scenario.max_context_overrides,
     )
     # 2. Env hygiene BEFORE drcode is imported anywhere (see docstring).
     _sanitize_own_environ(paths.config_home)
@@ -279,12 +295,20 @@ async def _run_with_optional_proxy(
             combo,
             matrix_path=matrix_path,
             proxy_base=report.proxy_base,
+            scenario_overrides=scenario.max_context_overrides,
         )
-        from .matrix import effective_max_context, load_matrix
+        from .matrix import load_matrix
 
         providers, _ = load_matrix(matrix_path)
         report.resolved_context_tokens = {
-            role: effective_max_context(combo, providers, role) for role in combo.roles()
+            role: effective_max_context(
+                combo, providers, role, scenario_overrides=scenario.max_context_overrides
+            )
+            for role in combo.roles()
+        }
+        report.resolved_context_sources = {
+            role: max_context_source(combo, role, scenario.max_context_overrides)
+            for role in combo.roles()
         }
     except EnvSetupError as e:
         report.reason = f"pre-flight failed: {e}"
@@ -435,11 +459,18 @@ def main(argv: list[str] | None = None) -> int:
         scenario = load_scenario(SCENARIOS_ROOT / args.scenario)
         matrix_path = Path(args.matrix)
         if args.combo:
-            get_combo(matrix_path, args.combo)  # validate early
+            combo = get_combo(matrix_path, args.combo)  # validate early
         else:
             _, combos = load_matrix(matrix_path)
             if not combos:
                 raise MatrixError(f"{matrix_path}: no [[combo]] entries")
+            combo = combos[0]
+        # A `[context] research` cap on a combo without a research role
+        # would silently never apply — loud config error before the run
+        # burns a slot (same cross-check plan_jobs does for the sweep).
+        check_research_override_assigned(
+            combo, scenario.max_context_overrides, f"scenario '{scenario.id}'"
+        )
     except (ScenarioError, MatrixError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -459,7 +490,10 @@ def main(argv: list[str] | None = None) -> int:
         faults = ", ".join(f"{k}×{v}" for k, v in report.proxy_faults.items())
         print(f"proxy:    {report.proxy_base} (faults: {faults or 'none'})")
     if report.resolved_context_tokens:
-        ctx = ", ".join(f"{role}={n}" for role, n in sorted(report.resolved_context_tokens.items()))
+        ctx = ", ".join(
+            f"{role}={n} ({report.resolved_context_sources.get(role, 'catalog')})"
+            for role, n in sorted(report.resolved_context_tokens.items())
+        )
         print(f"context:  max_context_tokens per role: {ctx}")
     print(f"result:   {'OK' if report.ok else 'FAILED'} — {report.reason}")
     for t in report.tasks:
