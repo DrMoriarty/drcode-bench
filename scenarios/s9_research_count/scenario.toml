@@ -1,0 +1,54 @@
+# S9 — первый research-сценарий (вариант V1): агент считает механически
+# проверяемую метрику по данным сида. kind=research skips the tester
+# entirely (plan §7): research ends with mark_done, never receives a
+# verification label and never has testing rounds — therefore [settle]
+# carries NO verification key (a research brief combined with
+# verification="passed" is a scenario-load error, bench/scenario.py);
+# the default settle criterion (§4) already requires the target task
+# to end COMPLETED, and checks.py asserts the rest mechanically.
+#
+# The brief pins the output format HARD (a single line exactly
+# "total: <number>" in docs/report.md): checks.py parses it with the
+# anchored regex ^total: N$. The reference value is NEVER hardcoded
+# here — checks.py recomputes it from the seed CSV, so the seed and
+# the check cannot drift apart. The path of the computation is
+# deliberately unconstrained in the brief (read_file + mental math or
+# run_bash with python/awk — any tool use is legitimate); guessing the
+# number without reading the data is impossible by construction.
+#
+# NB on the research agent's write limit (drcode research.md prompt):
+# write_file / edit_file / run_bash may only touch documentation
+# (*.md, AGENTS.md, docs/) — docs/report.md fits. The brief tells the
+# agent to create the file with write_file so it lands in
+# task.edited_files and the mandatory git_commit_docs commits it —
+# the stricter "git log -- docs/report.md non-empty" check of
+# checks.py relies on that.
+
+id = "s9_research_count"
+timeout = 30  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Посчитайте выручку по data/orders.csv"
+kind = "research"
+text = """
+В репозитории лежит data/orders.csv — журнал заказов интернет-магазина
+со столбцами order_id, status, amount. Статусы заказов: completed,
+cancelled, refunded, new.
+
+Проанализируйте файл и посчитайте суммарную выручку — сумму столбца
+amount ТОЛЬКО по заказам со статусом "completed". Остальные статусы
+(cancelled, refunded, new) в расчёт не входят. Способ вычисления не
+важен (read_file с ручным счётом, run_bash с python/awk — как удобнее),
+но считать нужно по данным файла, а не по догадкам. Файл
+data/orders.csv не изменяйте.
+
+Результат запишите в docs/report.md (создайте файл инструментом
+write_file). Файл должен содержать строку РОВНО вида
+
+total: <число>
+
+— слово "total", двоеточие, один пробел, целое число; на этой строке
+не должно быть ни валюты, ни разделителей разрядов, ни пояснений
+(дополнительные строки в файле допустимы, но указанная строка должна
+встречаться ровно один раз).
+"""

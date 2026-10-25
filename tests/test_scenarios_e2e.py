@@ -13,9 +13,12 @@ What each e2e run proves (the DoD of the stage):
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -104,12 +107,16 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+[providers.fake.models.s9-research]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
 tester     = "fake/{tester}"
 compaction = "fake/fake-compaction"
-research   = "fake/fake-research"
+research   = "fake/{research}"
 {extra}"""
 
 # Per-role max_context_tokens overrides appended to the generated combo —
@@ -147,7 +154,22 @@ COMBOS = {
     # S8: the fix loop lives inside ONE task (coder → tester → same coder);
     # no compaction pressure is needed — the loop is context-independent.
     "s8_fix_loop": ("s8-coder", "s8-tester"),
+    # S9: a kind=research brief — the coding/tester roles are assigned but
+    # never called (research skips the tester, plan §7); the research role
+    # serves the only task on its OWN scripted model.
+    "s9_research_count": ("fake-coder", "fake-tester"),
 }
+
+# The research model of each combo (defaults to the idle 4th-role model;
+# S9 gives the research role its own scripted agent so the research
+# transcript is distinguishable from the coder's in model_log.jsonl).
+RESEARCH_MODELS = {
+    "s9_research_count": "s9-research",
+}
+
+
+def _research_model(scenario_id: str) -> str:
+    return RESEARCH_MODELS.get(scenario_id, "fake-research")
 
 
 @pytest.fixture
@@ -179,6 +201,7 @@ async def _run_scenario(tmp_path: Path, monkeypatch, scenario_id: str):
                 combo=combo,
                 coder=coder,
                 tester=tester,
+                research=_research_model(scenario_id),
                 extra=COMBO_EXTRA_TOML.get(scenario_id, ""),
             ),
             encoding="utf-8",
@@ -535,6 +558,68 @@ async def test_s8_fix_loop_end_to_end(tmp_path: Path, monkeypatch, env_guard) ->
     assert not metrics["user_sim"]["failures"]
 
 
+async def test_s9_research_count_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S9 (variant V1 research): a kind=research brief — the agent computes
+    a metric from the seed CSV (the path is free; the scripted agent uses
+    run_bash + python, a legitimate tool use), writes docs/report.md in the
+    pinned format (one line exactly "total: <number>", parsed by the
+    anchored regex in checks.py) and commits it via git_commit_docs.
+    Research skips the tester entirely (plan §7): no verification label,
+    zero testing rounds, zero user interventions; checks.py recomputes the
+    reference from the seed CSV itself, so nothing is hardcoded twice."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s9_research_count")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+    (brief,) = report.tasks
+    assert brief["kind"] == "research"
+    assert brief["status"] == "completed"
+    # Research ends with mark_done: no tester, no verification label.
+    assert brief["verification"] is None
+    assert brief["n_testing_rounds"] == 0
+
+    # The research role SERVED the task: pre-flight resolved it into its
+    # OWN model (not the coding fallback), and the recorder log carries
+    # the research traffic under the distinct model tag.
+    assert report.resolved_roles.get("research") == "fake/s9-research"
+    log_records = read_jsonl(run_dir / "model_log.jsonl")
+    assert any("s9-research@" in str(r.get("role")) for r in log_records)
+    assert not any("fake-coder@" in str(r.get("role")) for r in log_records)
+
+    # The report is on disk in the pinned format and in the git history
+    # (git_commit_docs committed the agent's own write_file edit).
+    report_md = (run_dir / "workspace" / "docs" / "report.md").read_text(encoding="utf-8")
+    match = re.search(r"^total: (\d+)$", report_md, re.MULTILINE)
+    assert match, report_md
+    # The number is recomputed from the seed here too — the same contract
+    # checks.py enforces (no double-hardcoded reference).
+    with (run_dir / "workspace" / "data" / "orders.csv").open(encoding="utf-8", newline="") as f:
+        reference = sum(
+            int(row["amount"]) for row in csv.DictReader(f) if row["status"] == "completed"
+        )
+    assert int(match.group(1)) == reference
+    git_log = subprocess.run(
+        ["git", "log", "--", "docs/report.md"],
+        cwd=run_dir / "workspace",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert git_log.returncode == 0 and git_log.stdout.strip(), git_log.stderr
+
+    # §6: the research loop closes without any user intervention.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["totals"]["n_testing_rounds"] == 0
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
+
+
 async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard) -> None:
     """§9: `--use-proxy` forces the proxy for a scenario WITHOUT a
     [proxy] section — a fault-free recording proxy (the §5-recorder
@@ -554,6 +639,7 @@ async def test_s1_through_use_proxy_flag(tmp_path: Path, monkeypatch, env_guard)
                 combo=combo,
                 coder="fake-coder",
                 tester="fake-tester",
+                research=_research_model("s1_happy"),
                 extra="",
             ),
             encoding="utf-8",

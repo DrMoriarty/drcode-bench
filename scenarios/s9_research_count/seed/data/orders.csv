@@ -1,0 +1,15 @@
+order_id,status,amount
+1001,completed,1250
+1002,cancelled,800
+1003,completed,340
+1004,completed,9900
+1005,refunded,1500
+1006,completed,175
+1007,new,4200
+1008,completed,2680
+1009,cancelled,640
+1010,completed,75
+1011,completed,5310
+1012,refunded,2200
+1013,new,980
+1014,completed,4325

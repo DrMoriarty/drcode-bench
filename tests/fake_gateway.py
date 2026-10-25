@@ -41,6 +41,12 @@ Served models (scripted per model id, see SCRIPTS):
   "research" key → pre-flight → drcode's own role selection) runs for
   real; scenarios never queue kind=research briefs (plan §7), so the
   script fires only if the pipeline ever routes research work its way.
+- ``s9-research`` — the S9 scripted research agent: computes the metric
+  from seed/data/orders.csv with run_bash (python one-liner — a
+  legitimate tool use, the brief leaves the path free), writes
+  docs/report.md with write_file ("total: <number>" — the pinned format
+  checks.py parses) and commits it via git_commit_docs (the research.md
+  mandate for documentation assignments).
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -77,6 +83,7 @@ MODELS = (
     "s7-tester",
     "s8-coder",
     "s8-tester",
+    "s9-research",
 )
 
 
@@ -611,6 +618,42 @@ def _s8_tester_script(messages: list[dict]) -> dict:
     return _bash_end_run("Тесты зелёные, задача verified.")
 
 
+# -- S9: research task over the CSV seed (docs/report.md + git_commit_docs) -------
+
+# The metric computation is a legitimate tool use (the brief leaves the
+# path free): one python one-liner over data/orders.csv prints the sum of
+# `amount` over `status == "completed"` — the run_bash output carries the
+# number for the next step's write_file.
+S9_COUNT_CMD = (
+    'python3 -c "import csv; '
+    "print(sum(int(r['amount']) for r in "
+    "csv.DictReader(open('data/orders.csv')) "
+    "if r['status'] == 'completed'))\""
+)
+
+
+def _s9_research_script(messages: list[dict]) -> dict:
+    """Research agent for S9: compute the metric with run_bash, write
+    docs/report.md with write_file (tracked into task.edited_files), commit
+    it with git_commit_docs (the research.md mandate for documentation
+    assignments), end the turn. Stateless decisions from the history: the
+    computed number is parsed from the LAST run_bash output ('exit=0' line
+    first, the printed sum last)."""
+    if _called(messages, "git_commit_docs"):
+        return _bash_end_run("Готово: отчёт записан в docs/report.md и закоммичен.")
+    if _called(messages, "write_file"):
+        return _call("git_commit_docs", {"message": "Add revenue report"}, "call_commit")
+    if _called(messages, "run_bash"):
+        out = _last_bash_output(messages)
+        total = out.removeprefix("exit=0").strip().splitlines()[-1].strip()
+        return _call(
+            "write_file",
+            {"path": "docs/report.md", "content": f"total: {total}\n"},
+            "call_report",
+        )
+    return _run_bash(S9_COUNT_CMD, "call_count")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -629,6 +672,7 @@ SCRIPTS = {
     "s7-tester": _tester_script,
     "s8-coder": _s8_coder_script,
     "s8-tester": _s8_tester_script,
+    "s9-research": _s9_research_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but

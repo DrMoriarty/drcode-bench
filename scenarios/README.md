@@ -53,10 +53,10 @@ settle-критерий был достигнут.
 
 S1 happy path · S2a bug→follow-up · S2b bug-report тестера · S3 компакция
 у кодера · S4 компакция у тестера · S5 clarification · S6 очередь ·
-S7 fault injection (опция) · S8 tester fix loop.
+S7 fault injection (опция) · S8 tester fix loop · S9 research-подсчёт.
 
 Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**,
-**S6, S7 (этапы 5–6), S8 (fix-loop)**.
+**S6, S7 (этапы 5–6), S8 (fix-loop), S9 (research V1)**.
 
 ## Интерактивные сценарии этапа 3 (план §6/§7)
 
@@ -172,3 +172,29 @@ verification=PASSED; событие возврата в разработку д�
 (ключа round-2 фикса скриптованного кодера в fake_gateway). Комбо-факторы
 не нужны: fix-loop не зависит от контекста/компакции — достаточно
 baseline-single-model.
+
+## S9 — research-подсчёт по данным сида (research V1)
+
+Первый research-сценарий: бриф kind=research велит проанализировать
+`data/orders.csv` (сид — детерминированный журнал заказов, фиксирован
+коммитом) и записать суммарную выручку (sum(amount) по
+status="completed") в `docs/report.md` строкой ровно вида
+`total: <число>`. Формат закреплён жёстко — от него зависит парсинг.
+
+- research skips the tester (план §7): COMPLETED через mark_done,
+  без verification-метки, ноль testing-раундов; `[settle]` без
+  `verification` (research + verification="passed" — ошибка загрузки
+  сценария), COMPLETED таргета гарантирует базовый settle-критерий.
+- Путь вычисления брифом не ограничен (run_bash/python — легитимный
+  тул-юз); угадать число нельзя — оно читается из данных.
+- Бриф требует создавать отчёт инструментом write_file: правка
+  попадает в `task.edited_files`, и обязательный для документных
+  заданий `git_commit_docs` её коммитит.
+
+Assertions checks.py (verdict механический): эталон пересчитывается
+прямо из сидового CSV (сумма по фильтру) — сид и проверка не разъедутся;
+`docs/report.md` существует и содержит ровно одну строку под anchored
+regex `^total: (\d+)$`, число совпадает с эталоном; task JSON — ровно
+одна задача kind=research, status=completed, ноль testing-раундов,
+verification=None; строже — `git log -- docs/report.md` непуст
+(git_commit_docs использован; git недоступен → проверка пропускается).
