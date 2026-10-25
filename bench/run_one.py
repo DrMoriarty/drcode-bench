@@ -337,7 +337,8 @@ async def _run_with_optional_proxy(
     try:
         async with app.run_test(size=APP_SIZE) as pilot:
             await pilot.pause()
-            # 4. Queue the briefs (§4). NOT kind research — §7. created
+            # 4. Queue the briefs (§4) — any allowed kind, including
+            #    research (research skips the tester per plan §7). created
             #    AFTER mount on purpose: with an empty manager the app's
             #    on_mount takes the "new task" form instead of opening a
             #    task, so viewed_id stays None and no transcript is ever

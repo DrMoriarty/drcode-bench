@@ -34,7 +34,24 @@ def test_loads_repo_s1_happy() -> None:
     assert s.checks_file.is_file()
 
 
-def test_kinds_restricted_to_feature_bug(tmp_path: Path) -> None:
+def test_kind_research_allowed(tmp_path: Path) -> None:
+    """kind=research is queueable (plan §7: research skips the tester) —
+    but it can never back a settle verification="passed" assertion
+    (research ends with mark_done, no verification label)."""
+    s = _write_scenario(
+        tmp_path,
+        """
+        timeout = 10
+        [[briefs]]
+        title = "t"
+        text = "do"
+        kind = "research"
+        """,
+    )
+    assert s.briefs[0].kind == "research"
+
+
+def test_research_with_settle_passed_rejected(tmp_path: Path) -> None:
     with pytest.raises(ScenarioError, match="research"):
         _write_scenario(
             tmp_path,
@@ -44,6 +61,39 @@ def test_kinds_restricted_to_feature_bug(tmp_path: Path) -> None:
             title = "t"
             text = "do"
             kind = "research"
+            [settle]
+            verification = "passed"
+            """,
+        )
+
+
+def test_research_with_settle_any_or_absent_ok(tmp_path: Path) -> None:
+    """Mixed research+spawned scenarios: verification='any' (or no key)."""
+    for settle in ("", '[settle]\nverification = "any"\n'):
+        s = _write_scenario(
+            tmp_path,
+            f"""
+            timeout = 10
+            [[briefs]]
+            title = "t"
+            text = "do"
+            kind = "research"
+            {settle}
+            """,
+        )
+        assert s.briefs[0].kind == "research"
+
+
+def test_kind_unknown_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ScenarioError, match="not allowed"):
+        _write_scenario(
+            tmp_path,
+            """
+            timeout = 10
+            [[briefs]]
+            title = "t"
+            text = "do"
+            kind = "spike"
             """,
         )
 

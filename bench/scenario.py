@@ -14,8 +14,9 @@ scenario.toml:
     [[briefs]]
     title = "..."
     text  = "..."
-    kind  = "feature"           # ONLY "feature"/"bug" — research never
-                                # passes the tester (plan §7 rules)
+    kind  = "feature"           # "feature"/"bug"/"research" — research skips
+                                # the tester entirely (plan §7), so a research
+                                # brief forbids [settle] verification="passed"
 
     [settle]                    # scenario-specific part of the settle
                                 # criterion (§4); see bench/settle.py
@@ -41,9 +42,10 @@ from pathlib import Path
 
 from .proxy import ProxyError, parse_faults
 
-# Plan §7 rule: research tasks skip the tester entirely, so they can never
-# exercise the coding → testing loop the benchmark exists to measure.
-ALLOWED_KINDS = ("feature", "bug")
+# Plan §7 rule: research tasks skip the tester entirely (they end with
+# mark_done and never get a verification label). They are queueable, but a
+# scenario that wants a PASSED settle assertion must not use them.
+ALLOWED_KINDS = ("feature", "bug", "research")
 
 # The settle keys bench/settle.py knows how to evaluate. A scenario may not
 # invent new ones silently — a typo'd key would otherwise just be ignored
@@ -61,7 +63,7 @@ class Brief:
 
     title: str
     text: str
-    kind: str  # "feature" | "bug" (validated against ALLOWED_KINDS)
+    kind: str  # "feature" | "bug" | "research" (validated against ALLOWED_KINDS)
 
     def task_kind(self):
         from drcode.models import TaskKind
@@ -179,8 +181,7 @@ def _parse_briefs(data: dict) -> tuple[Brief, ...]:
         kind = str(b.get("kind", "feature"))
         if kind not in ALLOWED_KINDS:
             raise ScenarioError(
-                f"briefs[{i}]: kind {kind!r} not allowed — use one of "
-                f"{ALLOWED_KINDS} (research never passes the tester, plan §7)"
+                f"briefs[{i}]: kind {kind!r} not allowed — use one of {ALLOWED_KINDS}"
             )
         title = str(b.get("title", "")).strip()
         text = str(b.get("text", "")).strip()
@@ -201,6 +202,24 @@ def _parse_settle(data: dict) -> dict[str, object]:
             f"[settle] verification must be 'passed' or 'any', got {verification!r}"
         )
     return settle
+
+
+def _check_research_settle(briefs: tuple[Brief, ...], settle: dict[str, object], path) -> None:
+    """A research brief can never satisfy settle verification="passed"
+    (plan §7): research ends with mark_done and never receives a
+    verification label — there is no «verification successfully» for it.
+    Mixed scenarios (research + spawned feature/bug tasks) must use
+    verification="any" or omit the key; the spawned tasks' PASSED is
+    asserted by checks.py on the task JSON."""
+    if settle.get("verification") != "passed":
+        return
+    titles = [b.title for b in briefs if b.kind == "research"]
+    if titles:
+        raise ScenarioError(
+            f"{path}: [settle] verification='passed' is impossible with "
+            f"research brief(s) {titles} — research never passes the tester "
+            "(plan §7); use verification='any' or omit the key"
+        )
 
 
 def _parse_followups(data: dict) -> tuple[Followup, ...]:
@@ -303,12 +322,16 @@ def load_scenario(path: Path) -> Scenario:
     if not 0 < timeout <= 24 * 60:
         raise ScenarioError(f"{scenario_toml}: timeout must be in (0, 1440] minutes")
 
+    briefs = _parse_briefs(data)
+    settle = _parse_settle(data)
+    _check_research_settle(briefs, settle, scenario_toml)
+
     return Scenario(
         id=sid,
         dir=scenario_toml.parent,
-        briefs=_parse_briefs(data),
+        briefs=briefs,
         timeout_min=timeout,
-        settle=_parse_settle(data),
+        settle=settle,
         followups=_parse_followups(data),
         clarification_answers=_parse_clarification_answers(data),
         proxy=_parse_proxy(data),
