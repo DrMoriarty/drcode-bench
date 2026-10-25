@@ -54,11 +54,11 @@ settle-критерий был достигнут.
 S1 happy path · S2a bug→follow-up · S2b bug-report тестера · S3 компакция
 у кодера · S4 компакция у тестера · S5 clarification · S6 очередь ·
 S7 fault injection (опция) · S8 tester fix loop · S9 research-подсчёт ·
-S10 research-факты (V2) · S11 research-маршруты (V3).
+S10 research-факты (V2) · S11 research-маршруты (V3) · S12 research→багрепорт (V4).
 
 Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**,
 **S6, S7 (этапы 5–6), S8 (fix-loop), S9 (research V1), S10 (research V2),
-S11 (research V3)**.
+S11 (research V3), S12 (research V4)**.
 
 ## Интерактивные сценарии этапа 3 (план §6/§7)
 
@@ -72,6 +72,20 @@ S11 (research V3)**.
   прочих в очереди (по `activated_at` — bugs newest-first в
   `TaskManager.queued()`), обе brief-задачи COMPLETED, баг-задача прошла
   testing (PASSED).
+- `s12_research_bug_report/` — research-вариант V4: сид с ЗЕЛЁНЫМ сьютом
+  и ровно одним латентным дефектом вне покрытия тестов (batches_needed
+  теряет остаток — докстринг противоречит коду); research-агент находит
+  дефект чтением кода и под явной авторизацией брифа заводит багрепорт
+  через `create_bug_report` (kind=bug, origin="system", голова очереди);
+  порождённый баг выполняется ПОЛНЫМ пайплайном coding → testing и
+  завершается PASSED. E2E: research- и coder-транскрипты чередуются на
+  ОДНОЙ model id (прецедент S2b). Assertions checks.py: pytest зелёный,
+  research-таргет COMPLETED без метки и без testing-раундов, ровно один
+  create_bug_report в research-транскрипте, его текст совпадает с
+  баг-задачей, описание называет файл И функцию дефекта, баг-задача
+  COMPLETED/PASSED с testing-раундом. `[settle]` без verification:
+  дефолтный критерий держит ран, пока порождённый баг не разработан и
+  не протестирован.
 - `s5_clarification/` — brief требует данных, которых нет в репозитории:
   кодер вызывает `ask_clarifying_question`, симулятор отвечает через
   `TaskManager.send()` (голова очереди). Assertions checks.py: ответ

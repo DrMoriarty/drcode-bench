@@ -61,6 +61,18 @@ Served models (scripted per model id, see SCRIPTS):
   (the seed's decorator-over-def contract), renders the markdown table
   (method | path | handler) in docs/routes.md FROM THE GREP OUTPUT
   ITSELF and commits it via git_commit_docs.
+- ``s12-agent`` / ``s12-tester`` — the S12 loop (research variant V4):
+  ONE model id serves BOTH the research and the coding role (the S2b
+  precedent of alternating transcripts on one model). The research
+  transcript reads dispatch/pricing.py, files the ONE bug report via
+  create_bug_report (the brief's explicit authorization) with the
+  description composed FROM THE READ OUTPUT ITSELF (the defective
+  function name and the docstring example are parsed out of the tool
+  result — a drifted seed produces a report that checks.py rejects);
+  the spawned kind=bug task comes back to the SAME model id as the
+  coding transcript (its prompt is the report's description, which
+  names the function) and fixes the defect with one targeted run_bash;
+  the tester runs full pytest and stamps PASSED.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -101,6 +113,8 @@ MODELS = (
     "s9-research",
     "s10-research",
     "s11-research",
+    "s12-agent",
+    "s12-tester",
 )
 
 
@@ -824,6 +838,85 @@ def _s11_research_script(messages: list[dict]) -> dict:
     )
 
 
+# -- S12: research files a bug report; the spawned bug runs the full pipeline -----
+
+S12_PRICING_PATH = "dispatch/pricing.py"
+# The defective function: the brief names only the module — the name in the
+# report must come from the agent's own reading (parsed out of the read_file
+# result, see _s12_bug_report). The CODING phase of the same model id keys on
+# it appearing in the spawned bug's prompt (the report description); the
+# research brief must NOT contain it.
+S12_FUNCTION = "batches_needed"
+
+# The coder's fix for the spawned bug: keep the whole file, replace the
+# remainder-dropping return with the ceiling division (a targeted in-place
+# replace, like the S3 kappa fix — the rest of the module stays untouched).
+S12_FIX_CMD = (
+    "python3 -c \"import pathlib; p=pathlib.Path('dispatch/pricing.py'); "
+    "p.write_text(p.read_text().replace("
+    "'return items // per_batch', "
+    "'return -(-items // per_batch)'))\""
+)
+
+
+def _s12_bug_report(source: str) -> dict:
+    """Compose the bug report from the ACTUAL read output: the function
+    name and the docstring's example call are parsed out of the file the
+    research agent read — exactly the reading-based path the brief demands.
+    A drifted seed (renamed function, changed example) yields a report that
+    checks.py rejects instead of silently passing."""
+    match = re.search(r"(\w+)\((\d+),\s*(\d+)\)\s*==\s*(\d+)", source)
+    name = match.group(1) if match else S12_FUNCTION
+    items = int(match.group(2)) if match else 0
+    per_batch = int(match.group(3)) if match else 0
+    expected = int(match.group(4)) if match else 0
+    actual = items // per_batch
+    description = (
+        f"Логическая ошибка в {S12_PRICING_PATH}, функция {name}: результат "
+        f"{items} // {per_batch} отбрасывает остаток — неполная партия не "
+        f"учитывается, хотя контракт (докстринг) требует обратного. "
+        f"Проявление: {name}({items}, {per_batch}) возвращает {actual}, "
+        f"по контракту должно быть {expected}. Исправьте {name} в "
+        f"{S12_PRICING_PATH}: последняя неполная партия должна считаться, "
+        "полный pytest должен остаться зелёным."
+    )
+    return {"title": f"Починить {name}(): теряется неполная партия", "description": description}
+
+
+def _s12_agent_script(messages: list[dict]) -> dict:
+    """The S12 agent — ONE model id for BOTH the research and the coding
+    role (the S2b precedent of alternating transcripts on one model; the
+    transcripts never mix: each task has its own). Research phase: read
+    dispatch/pricing.py, file the ONE bug report via create_bug_report
+    (the brief's explicit authorization), end the turn. Coding phase (the
+    spawned bug's prompt IS the report description, which names the
+    defective function): fix it with one targeted run_bash, end the turn.
+    Stateless decisions from the history, like the other scenario scripts."""
+    prompt = _last_user_prompt(messages)
+    if S12_FUNCTION in prompt:
+        # Coding phase on the spawned bug task.
+        if _called(messages, "run_bash"):
+            return _bash_end_run("Дефект исправлен, pytest зелёный.")
+        return _run_bash(S12_FIX_CMD, "call_fix")
+    # Research phase (the brief names the module, never the function).
+    if _called(messages, "create_bug_report"):
+        return _bash_end_run("Багрепорт заведён, задача исследования завершена.")
+    if _called(messages, "read_file"):
+        return _call("create_bug_report", _s12_bug_report(_last_tool_output(messages)), "call_bug")
+    return _call("read_file", {"path": S12_PRICING_PATH}, "call_read")
+
+
+def _s12_tester_script(messages: list[dict]) -> dict:
+    """Tester for S12: full pytest on the spawned bug task; green → PASSED.
+    The seed suite is green by design and the scripted fix keeps it so;
+    the harness's checks.py re-runs pytest regardless of the verdict."""
+    if not any(m.get("role") == "tool" for m in messages):
+        return _run_bash("python3 -m pytest -q", "call_pytest")
+    if not _called(messages, "set_verification"):
+        return _call("set_verification", {"success": True}, "call_verdict")
+    return _bash_end_run("Тесты зелёные, задача verified.")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -845,6 +938,8 @@ SCRIPTS = {
     "s9-research": _s9_research_script,
     "s10-research": _s10_research_script,
     "s11-research": _s11_research_script,
+    "s12-agent": _s12_agent_script,
+    "s12-tester": _s12_tester_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,18 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+# S12: ONE scripted model id serves BOTH the research and the coding role
+# (the S2b precedent of alternating transcripts on one model — there the
+# coder serves two different tasks). The transcripts never mix: each task
+# carries its own, and the script keys the phase off the prompt/history.
+[providers.fake.models.s12-agent]
+max_context_tokens = 100000
+max_tokens = 8192
+
+[providers.fake.models.s12-tester]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -172,6 +185,11 @@ COMBOS = {
     # S11: same shape — the route-table research lives entirely on the
     # research role's own scripted model.
     "s11_research_routes": ("fake-coder", "fake-tester"),
+    # S12: the research and the coding role SHARE one scripted model id —
+    # the research transcript reads the seed and files the bug report, the
+    # spawned bug's coding transcript alternates on the same id (S2b
+    # precedent); the tester keeps its own id (pytest + verdict).
+    "s12_research_bug_report": ("s12-agent", "s12-tester"),
 }
 
 # The research model of each combo (defaults to the idle 4th-role model;
@@ -181,6 +199,9 @@ RESEARCH_MODELS = {
     "s9_research_count": "s9-research",
     "s10_research_facts": "s10-research",
     "s11_research_routes": "s11-research",
+    # S12: the research role runs on the SAME scripted model id as the
+    # coding role — the alternation under test.
+    "s12_research_bug_report": "s12-agent",
 }
 
 
@@ -772,6 +793,108 @@ async def test_s11_research_routes_end_to_end(tmp_path: Path, monkeypatch, env_g
 
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["totals"]["n_testing_rounds"] == 0
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
+
+
+async def test_s12_research_bug_report_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S12 (research variant V4): the research agent finds the LATENT defect
+    by reading (the seed suite is GREEN — pytest cannot reveal the defect,
+    unlike s2a) and files the bug report via create_bug_report under the
+    brief's explicit authorization; the spawned kind=bug task
+    (origin="system" via TaskManager.create) runs the FULL coding → testing
+    pipeline and passes. ONE scripted model id alternates the research and
+    the coding transcripts (the S2b precedent). Research skips the tester
+    (plan §7): no verification label, zero testing rounds, zero user
+    interventions; the default settle criterion holds the run until the
+    spawned bug is developed AND tested (the queue must drain)."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s12_research_bug_report")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+
+    # The research target: COMPLETED, no tester involvement.
+    (brief,) = [t for t in report.tasks if t["kind"] == "research"]
+    assert brief["status"] == "completed"
+    assert brief["verification"] is None
+    assert brief["n_testing_rounds"] == 0
+
+    # The spawned bug: exactly one, COMPLETED and PASSED — the FULL pipeline.
+    bugs = [t for t in report.tasks if t["kind"] == "bug"]
+    assert len(bugs) == 1, "the research agent must have filed exactly one bug report"
+    (bug,) = bugs
+    assert bug["status"] == "completed"
+    assert bug["verification"] == "Verified successfully"
+    assert bug["n_testing_rounds"] >= 1
+
+    # ONE model id served both roles: the research role resolved to the
+    # same scripted model as the coding role.
+    assert report.resolved_roles.get("coding") == "fake/s12-agent"
+    assert report.resolved_roles.get("research") == "fake/s12-agent"
+    log_records = read_jsonl(run_dir / "model_log.jsonl")
+    assert any("s12-agent@" in str(r.get("role")) for r in log_records)
+    assert any("s12-tester@" in str(r.get("role")) for r in log_records)
+
+    # The persisted task JSON: the research → bug chain is mechanical.
+    raw = [
+        json.loads(f.read_text(encoding="utf-8"))
+        for f in sorted((run_dir / "workspace" / ".drcode" / "tasks").glob("*.json"))
+    ]
+    (research_raw,) = [t for t in raw if t["kind"] == "research"]
+    (bug_raw,) = [t for t in raw if t["kind"] == "bug"]
+
+    # Exactly ONE create_bug_report call in the research transcript; the
+    # description (composed by the script FROM the read_file output) cites
+    # the code identifiers — file path AND function name.
+    calls = [
+        part
+        for msg in research_raw.get("messages") or []
+        for part in (msg.get("parts") or [])
+        if isinstance(part, dict)
+        and part.get("part_kind") == "tool-call"
+        and part.get("tool_name") == "create_bug_report"
+    ]
+    assert len(calls) == 1
+    args = json.loads(calls[0]["args"])
+    assert "dispatch/pricing.py" in args["description"]
+    assert "batches_needed" in args["description"]
+    assert args["title"] == bug_raw["title"]
+
+    # The report description became the bug task's first (and only) prompt.
+    bug_prompts = [
+        part["content"]
+        for msg in bug_raw.get("messages") or []
+        for part in (msg.get("parts") or [])
+        if isinstance(part, dict)
+        and part.get("part_kind") == "user-prompt"
+        and isinstance(part.get("content"), str)
+    ]
+    assert len(bug_prompts) == 1
+    assert bug_prompts[0].strip() == args["description"].strip()
+
+    # The coder's fix landed in the seed module: the remainder case now
+    # counts the incomplete batch, and the full suite is green on disk.
+    pricing = (run_dir / "workspace" / "dispatch" / "pricing.py").read_text(encoding="utf-8")
+    assert "-(-items // per_batch)" in pricing
+    pytest_run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=run_dir / "workspace",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert pytest_run.returncode == 0, pytest_run.stdout + pytest_run.stderr
+
+    # §6: no followups/clarifications — the loop closes without the user.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["totals"]["n_bug_tasks"] == 1
+    assert metrics["totals"]["n_testing_rounds"] >= 1
     assert metrics["user_sim"]["interventions"] == 0
     assert not metrics["user_sim"]["failures"]
 
