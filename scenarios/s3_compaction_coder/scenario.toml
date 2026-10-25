@@ -20,7 +20,7 @@ timeout = 45  # minutes — soft limit (§4: 30–60 min)
 # Кап КОДИНГОВОЙ модели: mid-run/turn-boundary гейты кодера считают порог
 # от конфига кодинговой модели (план §1.2, drcode ≥ 0.5.0 — пер-ролевое
 # разрешение моделей). Кап попадает в entry каталога models.json.
-coding = 3000
+coding = 5000
 
 [[briefs]]
 title = "Измените вес термина kappa на 42 (каталог glossary/)"

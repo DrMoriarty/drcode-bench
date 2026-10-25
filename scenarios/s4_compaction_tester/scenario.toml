@@ -26,7 +26,8 @@ timeout = 45  # minutes — soft limit (§4: 30–60 min)
 [context]
 # Кап МОДЕЛИ ТЕСТЕРА: mid-round гейт тестера делит на конфиг тестеровой
 # модели (план §1.2). Кап попадает в entry каталога models.json.
-tester = 3000
+# coding = 18000
+tester = 6000
 
 [[briefs]]
 title = "Почините format_report (разделитель записей)"
