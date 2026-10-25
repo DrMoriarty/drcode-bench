@@ -115,6 +115,10 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+[providers.fake.models.s11-research]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -165,6 +169,9 @@ COMBOS = {
     # S10: same shape — the research role serves the only task; the
     # coding/tester scripts stay idle for the whole run.
     "s10_research_facts": ("fake-coder", "fake-tester"),
+    # S11: same shape — the route-table research lives entirely on the
+    # research role's own scripted model.
+    "s11_research_routes": ("fake-coder", "fake-tester"),
 }
 
 # The research model of each combo (defaults to the idle 4th-role model;
@@ -173,6 +180,7 @@ COMBOS = {
 RESEARCH_MODELS = {
     "s9_research_count": "s9-research",
     "s10_research_facts": "s10-research",
+    "s11_research_routes": "s11-research",
 }
 
 
@@ -677,6 +685,80 @@ async def test_s10_research_facts_end_to_end(tmp_path: Path, monkeypatch, env_gu
     git_log = subprocess.run(
         ["git", "log", "--", "docs/findings.md"],
         cwd=run_dir / "workspace",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert git_log.returncode == 0 and git_log.stdout.strip(), git_log.stderr
+
+    # §6: the research loop closes without any user intervention.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["totals"]["n_testing_rounds"] == 0
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
+
+
+async def test_s11_research_routes_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S11 (variant V3 research): the agent extracts the route table of the
+    seed mini-router src/api/ (each endpoint is a '@route("METHOD /path")'
+    decorator directly above its 'def handle_*' handler) and documents it
+    as a markdown table in docs/routes.md (method | path | handler, one
+    row per route). The scripted research agent pairs the decorator/def
+    lines out of its OWN grep output — the table checks.py validates comes
+    from the seed through the tool results, not from the script. Markdown
+    tables are the most fragile research output, so the e2e asserts the
+    reference triples the same lenient way checks.py does (a line carrying
+    method AND path AND handler, not a strict table grid). Research skips
+    the tester entirely (plan §7): no verification label, zero testing
+    rounds, zero user interventions."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s11_research_routes")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+    (brief,) = report.tasks
+    assert brief["kind"] == "research"
+    assert brief["status"] == "completed"
+    # Research ends with mark_done: no tester, no verification label.
+    assert brief["verification"] is None
+    assert brief["n_testing_rounds"] == 0
+
+    # The research role SERVED the task on its OWN scripted model.
+    assert report.resolved_roles.get("research") == "fake/s11-research"
+    log_records = read_jsonl(run_dir / "model_log.jsonl")
+    assert any("s11-research@" in str(r.get("role")) for r in log_records)
+    assert not any("fake-coder@" in str(r.get("role")) for r in log_records)
+
+    # routes.md on disk answers EVERY reference route — the reference is
+    # recomputed from the workspace seed by the same decorator parsing
+    # checks.py enforces (no double-hardcoded reference); each triple must
+    # be carried by a single line (lenient row parse, like checks.py).
+    workspace = run_dir / "workspace"
+    routes_md = (workspace / "docs" / "routes.md").read_text(encoding="utf-8")
+    decorator_re = re.compile(r'@route\("([A-Z]+)\s+([^"]+)"\)\s*\ndef\s+(\w+)')
+    reference = {
+        triple
+        for path in (workspace / "src" / "api").rglob("*.py")
+        for triple in decorator_re.findall(path.read_text(encoding="utf-8"))
+    }
+    assert len(reference) == 5, reference
+    lowered_lines = [line.lower() for line in routes_md.splitlines()]
+    for method, route_path, handler in reference:
+        assert any(
+            method.lower() in line and route_path.lower() in line and handler.lower() in line
+            for line in lowered_lines
+        ), (routes_md, (method, route_path, handler))
+
+    # The table is in the git history (git_commit_docs committed the
+    # agent's own write_file edit).
+    git_log = subprocess.run(
+        ["git", "log", "--", "docs/routes.md"],
+        cwd=workspace,
         capture_output=True,
         text=True,
         check=False,

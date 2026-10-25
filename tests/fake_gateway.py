@@ -55,6 +55,12 @@ Served models (scripted per model id, see SCRIPTS):
   parsed out of the tool results — nothing about the facts is
   hardcoded in the script; a drifted seed produces a findings.md that
   checks.py rejects) and commits it via git_commit_docs.
+- ``s11-research`` — the S11 scripted research agent (variant V3): ONE
+  grep_search over the '@route(...' / '^def ' alternation, pairing
+  each @route("METHOD /path") entry with the def entry that follows it
+  (the seed's decorator-over-def contract), renders the markdown table
+  (method | path | handler) in docs/routes.md FROM THE GREP OUTPUT
+  ITSELF and commits it via git_commit_docs.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -69,6 +75,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sys
 
 FIX_CMD = "printf 'def shout(text):\\n    return text.upper() + \"!\"\\n' > string_utils.py"
@@ -93,6 +100,7 @@ MODELS = (
     "s8-tester",
     "s9-research",
     "s10-research",
+    "s11-research",
 )
 
 
@@ -756,6 +764,66 @@ def _s10_research_script(messages: list[dict]) -> dict:
     return _call("glob_files", {"pattern": "**/*.py"}, "call_glob")
 
 
+# -- S11: research over the route table (docs/routes.md + git_commit_docs) --------
+
+# One grep covers BOTH sides of the seed's decorator-over-def pairs: every
+# '@route("METHOD /path")' line arrives immediately before its 'def <name>'
+# line in the results (grep walks files top-down), so the route table for
+# docs/routes.md is parsed out of the TOOL RESULTS — nothing about the
+# routes is hardcoded in the script; a drifted seed produces a table that
+# checks.py rejects.
+S11_ROUTE_PATTERN = r"@route\(|^def "
+
+
+def _s11_table(messages: list[dict]) -> str:
+    """Compose docs/routes.md from the ACTUAL grep output: every
+    '@route("METHOD /path")' entry is paired with the next 'def <name>'
+    entry — the decorator-over-def contract the brief describes. Rendered
+    as the markdown table the brief pins (method | path | handler)."""
+    routes: list[tuple[str, str, str]] = []
+    pending: tuple[str, str] | None = None
+    for entry in _tool_entries(messages):
+        path, lineno, text = entry.split(":", 2) if entry.count(":") >= 2 else ("", "", "")
+        if not (path.endswith(".py") and lineno.isdigit()):
+            continue
+        text = text.strip()
+        match = re.match(r'@route\("(\w+) ([^"]+)"\)', text)
+        if match:
+            pending = (match.group(1), match.group(2))
+            continue
+        if pending and text.startswith("def "):
+            handler = text[4:].split("(", 1)[0].strip()
+            routes.append((*pending, handler))
+            pending = None
+    lines = ["| method | path | handler |", "| --- | --- | --- |"]
+    lines += [f"| {method} | {route_path} | {handler} |" for method, route_path, handler in routes]
+    return "\n".join(lines) + "\n"
+
+
+def _s11_research_script(messages: list[dict]) -> dict:
+    """Research agent for S11 (variant V3): ONE grep over the
+    decorator/def alternation, pair each @route(...) line with the def
+    line that follows it, write the markdown table composed from the
+    grep results, commit via git_commit_docs (the research.md mandate
+    for documentation assignments). Stateless decisions from the
+    history, like the other scenario scripts."""
+    if _called(messages, "git_commit_docs"):
+        return _bash_end_run("Готово: таблица маршрутов записана в docs/routes.md и закоммичена.")
+    if _called(messages, "write_file"):
+        return _call("git_commit_docs", {"message": "Add API route table"}, "call_commit")
+    if _called(messages, "grep_search"):
+        return _call(
+            "write_file",
+            {"path": "docs/routes.md", "content": _s11_table(messages)},
+            "call_report",
+        )
+    return _call(
+        "grep_search",
+        {"pattern": S11_ROUTE_PATTERN, "include": "*.py"},
+        "call_grep",
+    )
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -776,6 +844,7 @@ SCRIPTS = {
     "s8-tester": _s8_tester_script,
     "s9-research": _s9_research_script,
     "s10-research": _s10_research_script,
+    "s11-research": _s11_research_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but

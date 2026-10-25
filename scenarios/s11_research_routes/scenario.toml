@@ -1,0 +1,61 @@
+# S11 — research-сценарий, вариант V3 (самый сложный по парсингу вывода):
+# агент извлекает из сида маршрутную таблицу мини-роутера src/api/ и
+# оформляет её markdown-таблицей в docs/routes.md. kind=research skips the
+# tester entirely (plan §7): research ends with mark_done, never receives
+# a verification label and never has testing rounds — therefore [settle]
+# carries NO verification key (research + verification="passed" is a
+# scenario-load error, bench/scenario.py); the default settle criterion
+# (§4) already requires the target task to end COMPLETED, and checks.py
+# asserts the rest mechanically.
+#
+# Сид спроектирован под механическое извлечение: N=5 роутов, каждый —
+# ПАРА «@route("МЕТОД /путь")» непосредственно над «def handle_*»
+# (формат пары выбирает сид и зафиксирован в брифе). Каждая тройка
+# (method, path, handler) уникальна, каждая строка декоратора встречается
+# в дереве ровно один раз (декоратор только штампует spec на обработчик,
+# реестр хранит лишь имена) — grep по @route\(" не даёт ложных совпадений.
+#
+# Бриф самодостаточен и НЕ содержит ответов: ни путей, ни имён
+# обработчиков в нём нет (иначе сценарий вырождается в копирование) —
+# только формат вывода. Формат закреплён ЖЁСТКО по колонкам
+# (method | path | handler, по строке на роут), но markdown-таблица —
+# самая хрупкая часть среди всех research-сценариев: checks.py поэтому
+# парсит ПОСТРОЧНО («строка содержит method И path И handler»), не
+# требуя строгой решётки таблицы — разделители | и - допускаются.
+# Эталонная таблица НЕ хардкодится: checks.py извлекает её из сида тем
+# же декораторным парсингом (тот же контракт, что в S9/S10 — сид и
+# проверка не разъедаются).
+#
+# NB on the research agent's write limit (drcode research.md prompt):
+# write_file / edit_file / run_bash may only touch documentation
+# (*.md, AGENTS.md, docs/) — docs/routes.md fits. The brief tells the
+# agent to create the file with write_file so it lands in
+# task.edited_files and the mandatory git_commit_docs commits it —
+# the stricter "git log -- docs/routes.md non-empty" check of
+# checks.py relies on that.
+
+id = "s11_research_routes"
+timeout = 30  # minutes — soft limit (§4: 30–60 min)
+
+[[briefs]]
+title = "Составьте полный список маршрутов API в docs/routes.md"
+kind = "research"
+text = """
+В репозитории есть мини-роутер в пакете src/api/: каждый endpoint
+объявлен парой: строка-декоратор @route("МЕТОД /путь"), а сразу под
+ней — строка def с функцией-обработчиком. Декоратор и обработчик
+всегда идут такой парой.
+
+Составьте ПОЛНЫЙ список маршрутов API и оформите его в docs/routes.md
+(создайте файл инструментом write_file) как markdown-таблицу с тремя
+колонками — method | path | handler — именно в этом порядке, по одной
+строке на каждый маршрут:
+
+- method — HTTP-метод из декоратора (GET, POST, ...);
+- path — путь из декоратора, дословно, включая параметры вида {item_id};
+- handler — имя функции-обработчика (то, что стоит после def).
+
+Способ извлечения не важен (grep_search, read_file, run_bash — как
+удобнее), но список нужно составить чтением кода, а не по догадке.
+Исходные файлы не изменяйте.
+"""
