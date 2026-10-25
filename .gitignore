@@ -14,3 +14,4 @@ copilot.toml
 .drcode/settings.json
 .drcode/github_state.json
 .drcode/worktrees/
+*~
