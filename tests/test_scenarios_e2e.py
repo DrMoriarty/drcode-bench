@@ -31,6 +31,15 @@ api_key  = ""
 max_context_tokens = 100000
 max_tokens = 8192
 
+# The optional 4th combo role (research): its OWN model id — the gateway
+# scripts per model id, so a research transcript would be distinguishable
+# from the coder's. Scenarios never queue kind=research briefs (plan §7),
+# so the model is pre-flighted and resolved but never called — exactly the
+# "assigned, wired, idle" contract the research role has in drcode.
+[providers.fake.models.fake-research]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [providers.fake.models.fake-coder]
 max_context_tokens = 100000
 max_tokens = 8192
@@ -100,6 +109,7 @@ name       = "{combo}"
 coding     = "fake/{coder}"
 tester     = "fake/{tester}"
 compaction = "fake/fake-compaction"
+research   = "fake/fake-research"
 {extra}"""
 
 # Per-role max_context_tokens overrides appended to the generated combo —
@@ -204,6 +214,11 @@ async def test_s2a_bug_followup_end_to_end(tmp_path: Path, monkeypatch, env_guar
     assert report.ok, report.reason
     assert not report.timed_out
     assert report.checks_ok is True
+    # The optional 4th combo role traveled the whole pipeline: the
+    # pre-flight resolved research into its OWN model (not the coding
+    # fallback) and its context limit is on the record.
+    assert report.resolved_roles.get("research") == "fake/fake-research"
+    assert report.resolved_context_tokens.get("research") == 100000
     (brief,) = [t for t in report.tasks if t["title"].startswith("Почините div()")]
     assert brief["status"] == "completed"
     assert brief["verification"] == "Verified successfully"

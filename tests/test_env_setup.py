@@ -553,3 +553,194 @@ def test_verify_resolution_with_alias(
         "tester": "fake-b/small-8b",
         "compaction": "fake-b/small-8b",
     }
+
+
+# -- optional research role --------------------------------------------------------
+
+RESEARCH_MATRIX = """\
+[providers.fake-a]
+base_url = "http://fake-a.local:9000/v1"
+api_key  = ""
+
+[providers.fake-a.models.big-coder]
+max_context_tokens = 32768
+
+[providers.fake-a.models.researcher]
+max_context_tokens = 65536
+
+[providers.fake-b]
+base_url = "http://fake-b.local:9001/v1"
+api_key  = ""
+
+[providers.fake-b.models.small-8b]
+max_context_tokens = 8192
+
+[[combo]]
+name       = "with-research"
+coding     = "fake-a/big-coder"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+research   = "fake-a/researcher"
+research_max_context_tokens = 4000
+
+[[combo]]
+name       = "without-research"
+coding     = "fake-a/big-coder"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+
+[[combo]]
+name       = "research-conflict"
+coding     = "fake-a/big-coder"
+tester     = "fake-b/small-8b"
+compaction = "fake-b/small-8b"
+research   = "fake-a/big-coder"
+research_max_context_tokens = 2048
+"""
+
+
+@pytest.fixture
+def research_matrix_file(tmp_path: Path) -> Path:
+    path = tmp_path / "matrix.toml"
+    path.write_text(RESEARCH_MATRIX, encoding="utf-8")
+    return path
+
+
+def _research_combo(matrix_file: Path, name: str) -> Combo:
+    _, combos = load_matrix(matrix_file)
+    return next(c for c in combos if c.name == name)
+
+
+def test_prepare_run_without_research_writes_no_slot(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    """Backwards compatibility: a combo without research generates a
+    drcode.json with NO "research" key — drcode's own resolve_effective
+    falls back to coding, the generated files are byte-identical to the
+    pre-research format."""
+    combo = _research_combo(research_matrix_file, "without-research")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "r0", matrix_path=research_matrix_file
+    )
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    assert project["models"] == {
+        "coding": "fake-a/big-coder",
+        "tester": "fake-b/small-8b",
+        "compaction": "fake-b/small-8b",
+    }
+    assert "research" not in project["models"]
+
+
+def test_prepare_run_writes_research_slot(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    combo = _research_combo(research_matrix_file, "with-research")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "r1", matrix_path=research_matrix_file
+    )
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    assert project["models"]["research"] == "fake-a/researcher"
+
+
+def test_verify_resolution_covers_assigned_research(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    """Pre-flight: an assigned research role resolves into ITS ref (and its
+    combo override), never into the coding fallback; an unassigned one is
+    simply absent from the resolved map."""
+    combo = _research_combo(research_matrix_file, "with-research")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "pf1", matrix_path=research_matrix_file
+    )
+    resolved = verify_resolution(
+        paths.workspace, paths.config_home, combo, matrix_path=research_matrix_file
+    )
+    assert resolved == {
+        "coding": "fake-a/big-coder",
+        "tester": "fake-b/small-8b",
+        "compaction": "fake-b/small-8b",
+        "research": "fake-a/researcher",
+    }
+
+    combo0 = _research_combo(research_matrix_file, "without-research")
+    paths0 = prepare_run(
+        scenario_dir, combo0, tmp_path / "runs" / "pf0", matrix_path=research_matrix_file
+    )
+    resolved0 = verify_resolution(
+        paths0.workspace, paths0.config_home, combo0, matrix_path=research_matrix_file
+    )
+    assert "research" not in resolved0
+
+
+def test_verify_resolution_catches_lost_research_slot(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    """The research role resolving into the CODING model (the fallback)
+    while the combo assigns research = a pre-flight failure with a hint:
+    the generated drcode.json must carry the "research" key."""
+    combo = _research_combo(research_matrix_file, "with-research")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "pf2", matrix_path=research_matrix_file
+    )
+    # Sabotage: drop the research slot from the generated drcode.json —
+    # resolve() then returns "not set" and resolve_effective (inside the
+    # app) would silently run research tasks on the coding model.
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    del project["models"]["research"]
+    paths.project_config.write_text(json.dumps(project), encoding="utf-8")
+
+    with pytest.raises(EnvSetupError, match=r"role 'research'.*fall back to coding"):
+        verify_resolution(
+            paths.workspace, paths.config_home, combo, matrix_path=research_matrix_file
+        )
+
+
+def test_research_conflict_goes_to_ctx_clone(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    """coding and research reference the SAME provider model with different
+    research_max_context_tokens: the research role gets a
+    `<provider>--ctx<N>` clone (its own small context), coding keeps the
+    original provider patched to its own override — the §1.2 conflict
+    mechanism treats research like any other role."""
+    from bench.env_setup import materialize_providers
+
+    combo = _research_combo(research_matrix_file, "research-conflict")
+    providers, _ = load_matrix(research_matrix_file)
+    materialized, refs = materialize_providers(combo, providers)
+    # coding (first in role order) keeps the original provider; research
+    # (last) is re-pointed at the ctx clone.
+    assert refs["coding"] == ("fake-a", "big-coder")
+    clone_name = refs["research"][0]
+    assert clone_name.startswith("fake-a--ctx")
+    clone = materialized[clone_name]
+    assert clone.base_url == providers["fake-a"].base_url
+    assert clone.model("big-coder").max_context_tokens == 2048
+    assert materialized["fake-a"].model("big-coder").max_context_tokens == 32768
+
+    # End-to-end through the generated files + the real drcode resolution.
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "pf3", matrix_path=research_matrix_file
+    )
+    project = json.loads(paths.project_config.read_text(encoding="utf-8"))
+    assert project["models"]["coding"] == "fake-a/big-coder"
+    assert project["models"]["research"] == f"{clone_name}/big-coder"
+    resolved = verify_resolution(
+        paths.workspace, paths.config_home, combo, matrix_path=research_matrix_file
+    )
+    assert resolved["research"] == f"{clone_name}/big-coder"
+    assert resolved["coding"] == "fake-a/big-coder"
+
+
+def test_run_preflight_subprocess_roundtrips_research(
+    scenario_dir: Path, research_matrix_file: Path, tmp_path: Path
+) -> None:
+    """The subprocess pre-flight serializes the optional research role and
+    reconstructs the Combo on the other side of the pipe."""
+    combo = _research_combo(research_matrix_file, "with-research")
+    paths = prepare_run(
+        scenario_dir, combo, tmp_path / "runs" / "pf4", matrix_path=research_matrix_file
+    )
+    resolved = run_preflight_subprocess(paths, combo, matrix_path=research_matrix_file)
+    assert resolved["research"] == "fake-a/researcher"
+    assert resolved["coding"] == "fake-a/big-coder"

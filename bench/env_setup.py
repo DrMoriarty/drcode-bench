@@ -47,7 +47,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .matrix import (
-    ROLES,
     Combo,
     ModelSpec,
     ProviderSpec,
@@ -153,7 +152,10 @@ def materialize_providers(
     """
     refs: dict[str, tuple[str, str]] = {}
     ctxs: dict[str, int] = {}
-    for role in ROLES:
+    # Only the ASSIGNED roles (research is optional in a combo — absent
+    # means drcode's own coding fallback, nothing to materialize).
+    role_order = list(combo.roles())
+    for role in role_order:
         provider_name, model_id = parse_ref(combo.ref(role), f"combo '{combo.name}' role {role}")
         refs[role] = (provider_name, model_id)
         ctxs[role] = effective_max_context(combo, providers, role)
@@ -164,7 +166,7 @@ def materialize_providers(
     # Keys of `vnames`: (original provider, alias id) — deterministic, so
     # roles sharing an alias land on the same virtual provider.
     vnames: dict[tuple[str, str], str] = {}
-    for role in ROLES:
+    for role in role_order:
         provider_name, model_id = refs[role]
         model = providers[provider_name].model(model_id)
         if not model.is_alias:
@@ -191,7 +193,7 @@ def materialize_providers(
 
     # -- per-role max_context_tokens overrides (§1.2) ---------------------------
     wants: dict[tuple[str, str], dict[int, list[str]]] = {}
-    for role in ROLES:
+    for role in role_order:
         wants.setdefault(refs[role], {}).setdefault(ctxs[role], []).append(role)
 
     for (provider_name, model_id), by_ctx in wants.items():
@@ -202,10 +204,11 @@ def materialize_providers(
             if model.max_context_tokens != ctx:
                 out[provider_name] = _spec_with_model(spec, model, ctx)
             continue
-        # Conflict: the first role group in ROLES order wins the original
-        # provider (its entry patched to that group's effective ctx), the
-        # other groups get clones and their refs are rewritten.
-        kept_ctx = min(by_ctx, key=lambda ctx: min(ROLES.index(r) for r in by_ctx[ctx]))
+        # Conflict: the first role group in the combo's role order (the
+        # required ROLES order, research last) wins the original provider
+        # (its entry patched to that group's effective ctx), the other
+        # groups get clones and their refs are rewritten.
+        kept_ctx = min(by_ctx, key=lambda ctx: min(role_order.index(r) for r in by_ctx[ctx]))
         spec = out[provider_name]
         model = spec.model(model_id)
         if model.max_context_tokens != kept_ctx:
@@ -266,8 +269,8 @@ def _providers_for_combo(
             matrix_path = Path(__file__).resolve().parents[1] / "matrix.toml"
         providers, _ = load_matrix(matrix_path)
     used: set[str] = set()
-    for role in ROLES:
-        provider_name = combo.ref(role).partition("/")[0]
+    for role, ref in combo.roles().items():
+        provider_name = ref.partition("/")[0]
         if provider_name not in providers:
             raise EnvSetupError(
                 f"combo '{combo.name}' role '{role}': unknown provider '{provider_name}'"
@@ -518,10 +521,11 @@ def verify_resolution(
     matrix_path: Path | None = None,
     proxy_base: str | None = None,
 ) -> dict[str, str]:
-    """Pre-flight: resolve each role against the generated config and assert
-    the expected model AND the expected max_context_tokens (the compaction
-    scenarios live or die by the small coding context, §1.2). Returns
-    role → "provider/model" as resolved.
+    """Pre-flight: resolve each ASSIGNED role against the generated config
+    and assert the expected model AND the expected max_context_tokens (the
+    compaction scenarios live or die by the small coding context, §1.2).
+    Returns role → "provider/model" as resolved. An unassigned research
+    role is skipped entirely — drcode's own coding fallback covers it.
 
     Uses `drcode.providers.resolve()` — the same precedence (env >
     project models > catalog defaults) the run will see;
@@ -547,18 +551,30 @@ def verify_resolution(
     with _isolated_user_config(config_home):
         config = Config(project_root=Path(workspace).resolve())
         resolved: dict[str, str] = {}
-        for role in ROLES:
+        for role in combo.roles():
             agent_role = dproviders.AgentRole(role)
+            # NOTE: plain `resolve`, never `resolve_effective` — the
+            # research fallback would silently turn a dangling research
+            # slot into the coding model. A combo that ASSIGNS research
+            # must resolve into exactly that ref (a fallback here means
+            # the generated drcode.json lost its "research" key).
             eff = dproviders.resolve(config, agent_role)
             provider_name, model_id = refs[role]
             spec = catalog_providers[provider_name]
             model = spec.model(model_id)
             expected_base_url = spec.base_url
             if eff.model != model_id or eff.base_url != expected_base_url:
+                hint = ""
+                if role == "research":
+                    hint = (
+                        " (did the research role fall back to coding? the "
+                        "combo assigns research, so drcode.json must carry "
+                        'the "research" key)'
+                    )
                 raise EnvSetupError(
                     f"pre-flight failed for role '{role}': expected "
                     f"{model_id}@{expected_base_url}, resolved "
-                    f"{eff.model}@{eff.base_url}"
+                    f"{eff.model}@{eff.base_url}{hint}"
                 )
             if eff.max_context_tokens != model.max_context_tokens:
                 raise EnvSetupError(
@@ -593,6 +609,7 @@ def run_preflight_subprocess(
                 "coding": combo.coding,
                 "tester": combo.tester,
                 "compaction": combo.compaction,
+                "research": combo.research,
                 "max_context_overrides": [
                     [role, value] for role, value in combo.max_context_overrides
                 ],
@@ -627,6 +644,7 @@ def _preflight_main() -> int:
         coding=spec["combo"]["coding"],
         tester=spec["combo"]["tester"],
         compaction=spec["combo"]["compaction"],
+        research=spec["combo"].get("research"),
         max_context_overrides=tuple(
             (role, int(value)) for role, value in spec["combo"].get("max_context_overrides") or ()
         ),

@@ -213,7 +213,7 @@ async def run_benchmark(
         from .proxy import FaultProxy, ProxyError, upstreams_for_providers
 
         providers, _ = load_matrix(matrix_path)
-        used = {combo.ref(role).partition("/")[0] for role in ("coding", "tester", "compaction")}
+        used = {ref.partition("/")[0] for ref in combo.roles().values()}
         upstreams = upstreams_for_providers({name: providers[name] for name in sorted(used)})
         proxy = FaultProxy(
             upstreams,
@@ -280,11 +280,11 @@ async def _run_with_optional_proxy(
             matrix_path=matrix_path,
             proxy_base=report.proxy_base,
         )
-        from .matrix import ROLES, effective_max_context, load_matrix
+        from .matrix import effective_max_context, load_matrix
 
         providers, _ = load_matrix(matrix_path)
         report.resolved_context_tokens = {
-            role: effective_max_context(combo, providers, role) for role in ROLES
+            role: effective_max_context(combo, providers, role) for role in combo.roles()
         }
     except EnvSetupError as e:
         report.reason = f"pre-flight failed: {e}"

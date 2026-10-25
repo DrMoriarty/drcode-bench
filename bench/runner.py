@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .matrix import ROLES, MatrixError, get_combo, load_matrix
+from .matrix import MatrixError, get_combo, load_matrix
 from .scenario import Scenario, ScenarioError, load_scenario
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -76,8 +76,8 @@ def warn_missing_api_keys(matrix_path: Path) -> None:
     providers, combos = load_matrix(matrix_path)
     for combo in combos:
         seen: set[str] = set()
-        for role in ROLES:
-            provider_name = combo.ref(role).partition("/")[0]
+        for role, ref in combo.roles().items():
+            provider_name = ref.partition("/")[0]
             if provider_name in seen:
                 continue
             seen.add(provider_name)

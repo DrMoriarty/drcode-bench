@@ -12,8 +12,12 @@ turns the key into a local alias for a real provider model (`ModelSpec`,
 §8) — materialized into a virtual provider by `env_setup.materialize_providers`.
 
 A combo assigns a `"<provider>/<model-id>"` reference to each of the
-three agent roles drcode knows about (`AgentRole`): coding, tester,
-compaction.
+three REQUIRED agent roles drcode knows about (`AgentRole`): coding,
+tester, compaction. The fourth role, research, is OPTIONAL
+(`research = "provider/model"`): when a combo does not assign it, the
+research role is absent from the generated selection and drcode itself
+falls back to the coding model (`providers.resolve_effective`) — every
+pre-research matrix.toml stays valid.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROLES = ("coding", "tester", "compaction")
+# Roles a combo MAY additionally assign; absent = drcode's own fallback.
+OPTIONAL_ROLES = ("research",)
 
 
 class MatrixError(ValueError):
@@ -99,8 +105,9 @@ class Combo:
     0.5.0). TOML form, flat per role:
 
         [[combo]]
-        name   = "..."
-        coding = "provider-a/model"
+        name     = "..."
+        coding   = "provider-a/model"
+        research = "provider-a/researcher"   # optional
         coding_max_context_tokens = 3000
     """
 
@@ -108,13 +115,27 @@ class Combo:
     coding: str
     tester: str
     compaction: str
+    research: str | None = None
     max_context_overrides: tuple[tuple[str, int], ...] = ()
 
     def ref(self, role: str) -> str:
-        return getattr(self, role)
+        value = getattr(self, role)
+        if value is None:
+            raise MatrixError(f"combo '{self.name}': optional role '{role}' is not assigned")
+        return value
 
     def roles(self) -> dict[str, str]:
-        return {role: self.ref(role) for role in ROLES}
+        """The combo's assigned roles in a deterministic order: the three
+        required roles in ROLES order, then every assigned optional role —
+        research last (the ctx-conflict resolution of env_setup keeps the
+        original provider for the first role of a group, so the required
+        roles must keep priority over research)."""
+        roles = {role: self.ref(role) for role in ROLES}
+        for role in OPTIONAL_ROLES:
+            value = getattr(self, role)
+            if value is not None:
+                roles[role] = value
+        return roles
 
     def max_context_override(self, role: str) -> int | None:
         """The combo's `max_context_tokens` override for a role (None =
@@ -149,16 +170,26 @@ def parse_ref(ref: str, context: str) -> tuple[str, str]:
     return provider, model
 
 
-def _parse_max_context_overrides(raw: dict, *, combo_name: str) -> tuple[tuple[str, int], ...]:
+def _parse_max_context_overrides(
+    raw: dict, *, combo_name: str, assigned: tuple[str, ...]
+) -> tuple[tuple[str, int], ...]:
     """Per-role `max_context_tokens` overrides of a combo entry: flat TOML
     keys `<role>_max_context_tokens` (§1.2: the small context goes to the
     compacted role — S3 → coding, S4 → tester; since drcode 0.5.0 each
-    compaction gate reads its own role's resolved config)."""
+    compaction gate reads its own role's resolved config). An override on
+    an unassigned optional role would silently never apply (the role
+    falls back to coding and reads coding's resolved config), so it is an
+    error instead."""
     out: list[tuple[str, int]] = []
-    for role in ROLES:
+    for role in (*ROLES, *OPTIONAL_ROLES):
         value = raw.get(f"{role}_max_context_tokens")
         if value is None:
             continue
+        if role not in assigned:
+            raise MatrixError(
+                f"combo '{combo_name}': {role}_max_context_tokens is set, "
+                f"but the combo assigns no '{role}' role"
+            )
         value = int(value)
         if value <= 0:
             raise MatrixError(f"combo '{combo_name}': {role}_max_context_tokens must be > 0")
@@ -232,13 +263,18 @@ def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
         missing = [r for r in ROLES if r not in raw]
         if missing:
             raise MatrixError(f"combo #{i}: missing roles: {', '.join(missing)}")
+        name = str(raw.get("name", f"combo-{i}"))
+        # Optional roles (research): assigned only when present in the TOML
+        # — the missing-role check above stays on the required three.
+        assigned = tuple(r for r in (*ROLES, *OPTIONAL_ROLES) if raw.get(r) is not None)
         combo = Combo(
-            name=str(raw.get("name", f"combo-{i}")),
+            name=name,
             coding=str(raw["coding"]),
             tester=str(raw["tester"]),
             compaction=str(raw["compaction"]),
+            research=str(raw["research"]) if raw.get("research") is not None else None,
             max_context_overrides=_parse_max_context_overrides(
-                raw, combo_name=str(raw.get("name", f"combo-{i}"))
+                raw, combo_name=name, assigned=assigned
             ),
         )
         # Every referenced model must exist in the matrix.

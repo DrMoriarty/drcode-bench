@@ -34,7 +34,13 @@ Served models (scripted per model id, see SCRIPTS):
   edit of pad() breaks the dependent test_row by design, the tester
   stamps set_verification(success=False, retry_here=True), the report
   requeues the task into development, round 2 repairs the regression
-  and the tester stamps PASSED.
+  and the tester stamps PASSED;
+- ``fake-research`` — the optional 4th combo role: a research model with
+  its own transcript (plain analysis text, no tools). The e2e combos
+  assign it so the whole 4th-role plumbing (matrix → drcode.json
+  "research" key → pre-flight → drcode's own role selection) runs for
+  real; scenarios never queue kind=research briefs (plan §7), so the
+  script fires only if the pipeline ever routes research work its way.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -57,6 +63,7 @@ MODELS = (
     "fake-coder",
     "fake-tester",
     "fake-compaction",
+    "fake-research",
     "s2a-coder",
     "s2a-tester",
     "s2b-coder",
@@ -105,6 +112,19 @@ def _tester_script(messages: list[dict]) -> dict:
 
 def _compaction_script(messages: list[dict]) -> dict:
     return {"text": "Задача: сделать shout() корректной; правка внесена, тесты зелёные."}
+
+
+def _research_script(messages: list[dict]) -> dict:
+    """Research role (optional 4th combo role): a plain-text analysis —
+    the research load profile reads and summarizes, no tools, no code
+    edits; deliberately DISTINCT from _coder_script so a research
+    transcript is recognizable in model_log/metrics as its own model."""
+    return {
+        "text": (
+            "Анализ: изменение затрагивает shout() в string_utils.py; "
+            "существующие вызовы совместимы, риск регрессии минимальный."
+        )
+    }
 
 
 # -- helpers for the scenario scripts -------------------------------------------
@@ -595,6 +615,7 @@ SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
     "fake-compaction": _compaction_script,
+    "fake-research": _research_script,
     "s2a-coder": _s2a_coder_script,
     "s2a-tester": _bugfix_tester_script,
     "s2b-coder": _s2b_coder_script,
