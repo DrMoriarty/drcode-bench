@@ -132,6 +132,19 @@ max_tokens = 8192
 max_context_tokens = 100000
 max_tokens = 8192
 
+# S13: ONE scripted model id serves BOTH the research and the coding role
+# (the S12 precedent): the research transcript greps the deprecated token
+# and files the feature request with the site plan, the spawned feature's
+# coding transcript alternates on the same id; the tester keeps its own id
+# (pytest + verdict).
+[providers.fake.models.s13-agent]
+max_context_tokens = 100000
+max_tokens = 8192
+
+[providers.fake.models.s13-tester]
+max_context_tokens = 100000
+max_tokens = 8192
+
 [[combo]]
 name       = "{combo}"
 coding     = "fake/{coder}"
@@ -190,6 +203,11 @@ COMBOS = {
     # spawned bug's coding transcript alternates on the same id (S2b
     # precedent); the tester keeps its own id (pytest + verdict).
     "s12_research_bug_report": ("s12-agent", "s12-tester"),
+    # S13: same shared-id shape — the research transcript plans the
+    # refactor into a create_feature_request, the spawned feature's
+    # coding transcript alternates on the same id; the tester keeps its
+    # own id (pytest + verdict).
+    "s13_research_feature": ("s13-agent", "s13-tester"),
 }
 
 # The research model of each combo (defaults to the idle 4th-role model;
@@ -202,6 +220,8 @@ RESEARCH_MODELS = {
     # S12: the research role runs on the SAME scripted model id as the
     # coding role — the alternation under test.
     "s12_research_bug_report": "s12-agent",
+    # S13: same shared-id shape — research and coding alternate on one id.
+    "s13_research_feature": "s13-agent",
 }
 
 
@@ -894,6 +914,120 @@ async def test_s12_research_bug_report_end_to_end(tmp_path: Path, monkeypatch, e
 
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["totals"]["n_bug_tasks"] == 1
+    assert metrics["totals"]["n_testing_rounds"] >= 1
+    assert metrics["user_sim"]["interventions"] == 0
+    assert not metrics["user_sim"]["failures"]
+
+
+async def test_s13_research_feature_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
+    """S13 (research variant V5, the heaviest one): the COMPOUND
+    research → planning → coding → testing chain. The research agent
+    composes the refactor PLAN into a create_feature_request whose
+    description lists ALL change sites (the seed's canonical list is
+    exactly 5 telemetry modules carrying the deprecated math.floor
+    token); the spawned kind=feature task (origin="system" via
+    TaskManager.create, the TAIL of the queue — unlike the S12 bug)
+    runs the FULL coding → testing pipeline and passes. ONE scripted
+    model id alternates the research and the coding transcripts (the
+    S12 precedent). The default settle criterion holds the run until
+    the spawned feature is developed AND tested (the queue must
+    drain); the plan's completeness and the actual implementation are
+    asserted mechanically from the task JSON and the workspace."""
+    report = await _run_scenario(tmp_path, monkeypatch, "s13_research_feature")
+    run_dir = Path(report.run_dir)
+
+    assert report.ok, report.reason
+    assert not report.timed_out
+    assert report.checks_ok is True
+
+    # The research target: COMPLETED, no tester involvement.
+    (brief,) = [t for t in report.tasks if t["kind"] == "research"]
+    assert brief["status"] == "completed"
+    assert brief["verification"] is None
+    assert brief["n_testing_rounds"] == 0
+
+    # The spawned feature: exactly one, COMPLETED and PASSED — the FULL
+    # pipeline, after the research task activated it from the queue tail.
+    features = [t for t in report.tasks if t["kind"] == "feature"]
+    assert len(features) == 1, "the research agent must have filed exactly one feature request"
+    (feature,) = features
+    assert feature["status"] == "completed"
+    assert feature["verification"] == "Verified successfully"
+    assert feature["n_testing_rounds"] >= 1
+    assert brief["activated_at"] < feature["activated_at"]
+
+    # ONE model id served both roles: the research role resolved to the
+    # same scripted model as the coding role.
+    assert report.resolved_roles.get("coding") == "fake/s13-agent"
+    assert report.resolved_roles.get("research") == "fake/s13-agent"
+    log_records = read_jsonl(run_dir / "model_log.jsonl")
+    assert any("s13-agent@" in str(r.get("role")) for r in log_records)
+    assert any("s13-tester@" in str(r.get("role")) for r in log_records)
+
+    # The canonical change-site list of the seed (5 telemetry modules).
+    seed = REPO / "scenarios" / "s13_research_feature" / "seed"
+    sites = sorted(
+        p.relative_to(seed).as_posix()
+        for p in seed.rglob("*.py")
+        if "math.floor" in p.read_text(encoding="utf-8")
+    )
+    assert len(sites) == 5
+
+    # The persisted task JSON: the research → feature chain is mechanical.
+    raw = [
+        json.loads(f.read_text(encoding="utf-8"))
+        for f in sorted((run_dir / "workspace" / ".drcode" / "tasks").glob("*.json"))
+    ]
+    (research_raw,) = [t for t in raw if t["kind"] == "research"]
+    (feature_raw,) = [t for t in raw if t["kind"] == "feature"]
+
+    # Exactly ONE create_feature_request call in the research transcript;
+    # the description (composed by the script FROM the grep output) lists
+    # EVERY canonical path — the compound planning step under test.
+    calls = [
+        part
+        for msg in research_raw.get("messages") or []
+        for part in (msg.get("parts") or [])
+        if isinstance(part, dict)
+        and part.get("part_kind") == "tool-call"
+        and part.get("tool_name") == "create_feature_request"
+    ]
+    assert len(calls) == 1
+    args = json.loads(calls[0]["args"])
+    for site in sites:
+        assert site in args["description"].lower()
+    assert args["title"] == feature_raw["title"]
+
+    # The request description became the feature task's first prompt.
+    feature_prompts = [
+        part["content"]
+        for msg in feature_raw.get("messages") or []
+        for part in (msg.get("parts") or [])
+        if isinstance(part, dict)
+        and part.get("part_kind") == "user-prompt"
+        and isinstance(part.get("content"), str)
+    ]
+    assert feature_prompts[0].strip() == args["description"].strip()
+
+    # The compound chain closed on disk: the deprecated token is gone
+    # from every listed site, and the full suite is green in the workspace.
+    for site in sites:
+        assert "math.floor" not in (run_dir / "workspace" / site).read_text(encoding="utf-8")
+    pytest_run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=run_dir / "workspace",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert pytest_run.returncode == 0, pytest_run.stdout + pytest_run.stderr
+
+    # §6: no followups/clarifications — the loop closes without the user.
+    records = read_jsonl(run_dir / "user_sim.jsonl")
+    assert records, "the simulator must at least log its start"
+    assert not [r for r in records if r["action"] != "start"]
+
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["totals"]["n_testing_rounds"] >= 1
     assert metrics["user_sim"]["interventions"] == 0
     assert not metrics["user_sim"]["failures"]

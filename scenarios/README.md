@@ -54,11 +54,12 @@ settle-критерий был достигнут.
 S1 happy path · S2a bug→follow-up · S2b bug-report тестера · S3 компакция
 у кодера · S4 компакция у тестера · S5 clarification · S6 очередь ·
 S7 fault injection (опция) · S8 tester fix loop · S9 research-подсчёт ·
-S10 research-факты (V2) · S11 research-маршруты (V3) · S12 research→багрепорт (V4).
+S10 research-факты (V2) · S11 research-маршруты (V3) · S12 research→багрепорт (V4) ·
+S13 research→план доработки (V5, compound).
 
 Реализованы: S1, S2a, S2b, S5 (этапы 1–3), **S3, S4 (этап 4)**,
 **S6, S7 (этапы 5–6), S8 (fix-loop), S9 (research V1), S10 (research V2),
-S11 (research V3), S12 (research V4)**.
+S11 (research V3), S12 (research V4), S13 (research V5, compound)**.
 
 ## Интерактивные сценарии этапа 3 (план §6/§7)
 
@@ -86,6 +87,31 @@ S11 (research V3), S12 (research V4)**.
   COMPLETED/PASSED с testing-раундом. `[settle]` без verification:
   дефолтный критерий держит ран, пока порождённый баг не разработан и
   не протестирован.
+- `s13_research_feature/` — research-вариант V5 и САМЫЙ ТЯЖЁЛЫЙ:
+  compound-цепочка research → planning → coding → testing. Сид — пакет
+  `telemetry/` из 5 однотипных модулей, каждый считает средний уровень
+  устаревшей конструкцией `math.floor(сумма / окно)`; токен встречается
+  в дереве РОВНО 5 раз (только целевые строки — ни одного упоминания в
+  докстрингах/комментариях/тестах), канонический список мест однозначен.
+  Замена `math.floor(x / y)` → `x // y` сохраняет результат (чтения
+  неотрицательны), поэтому сид-сьют ЗЕЛЁНЫЙ и НЕ зависит от паттерна.
+  Research-агент составляет ПЛАН доработки — задачу через
+  `create_feature_request` (kind=feature, origin="system", ХВОСТ очереди —
+  в отличие от бага S12) с маркированным списком ВСЕХ файлов; порождённая
+  feature выполняется ПОЛНЫМ пайплайном coding → testing и завершается
+  PASSED. E2E: research- и coder-транскрипты чередуются на ОДНОЙ model id
+  (прецедент S12). Assertions checks.py: pytest зелёный; эталонный список
+  мест пересчитывается из СИДА (не из workspace — кодер уже изменил его
+  копию), по одному вхождению токена на файл; research-таргет COMPLETED
+  без метки и без testing-раундов; ровно один create_feature_request в
+  research-транскрипте, его текст совпадает с feature-задачей; описание
+  содержит КАЖДЫЙ из 5 путей (case-insensitive substring — частичный
+  список = провал); каждый перечисленный файл в workspace больше не
+  содержит токен (замена наблюдаема на диске — pytest зелёный сам по
+  себе прошёл бы и «холостой» ран); feature-задача COMPLETED/PASSED с
+  testing-раундом. `[settle]` без verification: дефолтный критерий держит
+  ран, пока порождённая feature не разработана и не протестирована;
+  таймаут — с запасом на три цикла.
 - `s5_clarification/` — brief требует данных, которых нет в репозитории:
   кодер вызывает `ask_clarifying_question`, симулятор отвечает через
   `TaskManager.send()` (голова очереди). Assertions checks.py: ответ

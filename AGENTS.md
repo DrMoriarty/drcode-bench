@@ -62,7 +62,8 @@ Ruff/pyright are scoped to `bench/` + `tests/` — the `drcode/` submodule is ex
 - Scenario = `scenarios/<id>/` with `seed/` (copied into the run workspace), `scenario.toml` (briefs, followups, clarification_answers, timeout, `[settle]`), and `checks.py` (harness calls `python checks.py <workspace>`; exit 0 = green). Verdicts are always **mechanical** — the harness runs pytest in the workspace itself; never judge by agent words.
 - Task kinds in briefs: `feature`/`bug` only — `research` tasks never reach the tester.
 - Implemented scenarios: S1, S2a, S2b, S3, S4, S5, S6, S7, S8, S9 (research V1), S10 (research V2),
-  S11 (research V3, route table).
+  S11 (research V3, route table), S12 (research V4, spawned bug report),
+  S13 (research V5, compound research→planning→coding→testing).
 - S8 (`s8_fix_loop`) covers drcode's internal tester fix loop (upstream
   18b48f9): the brief's change breaks a dependent test BY DESIGN (the full
   seed suite is green before the edit — the contrast with s2a), the tester

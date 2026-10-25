@@ -73,6 +73,19 @@ Served models (scripted per model id, see SCRIPTS):
   coding transcript (its prompt is the report's description, which
   names the function) and fixes the defect with one targeted run_bash;
   the tester runs full pytest and stamps PASSED.
+- ``s13-agent`` / ``s13-tester`` — the S13 loop (research variant V5,
+  the compound research → planning → coding → testing chain): ONE model
+  id serves BOTH the research and the coding role (the S12 precedent).
+  The research transcript greps the deprecated ``math.floor`` token
+  across the telemetry package, files the ONE feature request via
+  create_feature_request (the brief's explicit authorization) with the
+  description composed FROM THE GREP OUTPUT ITSELF (the change-site
+  paths are parsed out of the tool result — a drifted seed produces a
+  partial plan that checks.py rejects); the spawned kind=feature task
+  comes back to the SAME model id as the coding transcript (its prompt
+  is the request description, whose bullet list names every site) and
+  replaces the deprecated pattern in every listed file with one
+  targeted run_bash; the tester runs full pytest and stamps PASSED.
 
 The gateway implements just enough of the OpenAI protocol for pydantic-ai:
 
@@ -115,6 +128,8 @@ MODELS = (
     "s11-research",
     "s12-agent",
     "s12-tester",
+    "s13-agent",
+    "s13-tester",
 )
 
 
@@ -917,6 +932,99 @@ def _s12_tester_script(messages: list[dict]) -> dict:
     return _bash_end_run("Тесты зелёные, задача verified.")
 
 
+# -- S13: research plans the refactor (create_feature_request); the spawned
+# feature runs the full pipeline -------------------------------------------
+
+# The package and the deprecated pattern the brief names; the canonical
+# site list (5 telemetry modules) is NOT hardcoded here — the paths are
+# parsed out of the grep results (see _s13_feature_request), so a drifted
+# seed produces a plan that checks.py rejects instead of silently passing.
+S13_PACKAGE = "telemetry"
+S13_TOKEN = "math.floor"
+
+# The uniform pattern line of the seed (identical in all five modules, so
+# ONE targeted in-place replace covers every site — like the S3 kappa fix).
+S13_OLD = "math.floor(sum(readings) / window_s)"
+S13_NEW = "sum(readings) // window_s"
+
+S13_FIX_CMD = (
+    'python3 -c "import pathlib; '
+    "[p.write_text(p.read_text().replace("
+    f"'{S13_OLD}', "
+    f"'{S13_NEW}')) "
+    f"for p in pathlib.Path('{S13_PACKAGE}').glob('*.py')]\""
+)
+
+
+def _s13_feature_request(grep_output: str) -> dict:
+    """Compose the feature request from the ACTUAL grep output: the site
+    paths are parsed out of the tool result — exactly the reading-based
+    path the brief demands (the canonical list of ALL places). A drifted
+    seed yields an incomplete plan that checks.py rejects."""
+    paths = sorted(set(re.findall(rf"{S13_PACKAGE}/[a-z_]+\.py", grep_output)))
+    bullets = "\n".join(f"- {p}" for p in paths)
+    description = (
+        f"Перевести пакет {S13_PACKAGE} на целочисленное деление: заменить "
+        f"конструкцию {S13_TOKEN}(...) на оператор // во всех местах, где "
+        "она используется. Полный список файлов для изменения:\n"
+        f"{bullets}\n"
+        f"В каждом перечисленном файле заменить {S13_OLD} на {S13_NEW}; "
+        "полный pytest должен остаться зелёным."
+    )
+    return {
+        "title": f"Перевести {S13_PACKAGE} на целочисленное деление",
+        "description": description,
+    }
+
+
+def _s13_agent_script(messages: list[dict]) -> dict:
+    """The S13 agent — ONE model id for BOTH the research and the coding
+    role (the S12 precedent of alternating transcripts on one model; the
+    transcripts never mix: each task has its own). Research phase: grep
+    the deprecated token across the package, file the ONE feature
+    request via create_feature_request (the brief's explicit
+    authorization) with the site list composed FROM THE GREP OUTPUT,
+    end the turn. Coding phase (the spawned feature's prompt IS the
+    request description, whose bullet list carries '- telemetry/'):
+    apply the replacement in every listed file with one targeted
+    run_bash, end the turn. Stateless decisions from the history, like
+    the other scenario scripts."""
+    prompt = _last_user_prompt(messages)
+    # Coding phase discriminator: the request's bullet list ("-
+    # telemetry/cpu.py") — the research brief names the package but never
+    # as a bullet, so the phase split cannot misfire either way.
+    if f"- {S13_PACKAGE}/" in prompt:
+        if _called(messages, "run_bash"):
+            return _bash_end_run("Замена выполнена во всех файлах, pytest зелёный.")
+        return _run_bash(S13_FIX_CMD, "call_fix")
+    # Research phase (the brief names the pattern, never the paths).
+    if _called(messages, "create_feature_request"):
+        return _bash_end_run("Задача на доработку составлена, исследование завершено.")
+    if _called(messages, "grep_search"):
+        return _call(
+            "create_feature_request",
+            _s13_feature_request(_last_tool_output(messages)),
+            "call_request",
+        )
+    return _call(
+        "grep_search",
+        {"pattern": S13_TOKEN, "include": f"{S13_PACKAGE}/*.py"},
+        "call_grep",
+    )
+
+
+def _s13_tester_script(messages: list[dict]) -> dict:
+    """Tester for S13: full pytest on the spawned feature task; green →
+    PASSED. The seed suite is green by design and the scripted
+    replacement (behavior-preserving) keeps it so; the harness's
+    checks.py re-runs pytest regardless of the verdict."""
+    if not any(m.get("role") == "tool" for m in messages):
+        return _run_bash("python3 -m pytest -q", "call_pytest")
+    if not _called(messages, "set_verification"):
+        return _call("set_verification", {"success": True}, "call_verdict")
+    return _bash_end_run("Тесты зелёные, задача verified.")
+
+
 SCRIPTS = {
     "fake-coder": _coder_script,
     "fake-tester": _tester_script,
@@ -940,6 +1048,8 @@ SCRIPTS = {
     "s11-research": _s11_research_script,
     "s12-agent": _s12_agent_script,
     "s12-tester": _s12_tester_script,
+    "s13-agent": _s13_agent_script,
+    "s13-tester": _s13_tester_script,
 }
 
 # Fixed usage the gateway reports for every completion — small but
