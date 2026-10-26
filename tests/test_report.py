@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from bench.report import (
+    _md_to_html,
     _tokens_by_role,
     aggregate_pairs,
     discover_runs,
@@ -525,6 +526,28 @@ def test_html_glossary_tooltips(tmp_path: Path) -> None:
     # Non-glossary cells are untouched by the tooltip pass.
     assert "<td>green</td>" in text
     assert "<td>c1</td>" in text
+
+
+def test_html_indented_block_line_terminates_paragraph() -> None:
+    """A non-blank line indented before `#`/`- `/`|` misses the unstripped
+    outer dispatch but the stripped paragraph exclusion — the fallback
+    branch must still consume it or `_md_to_html` spins forever (real
+    trigger: indented comments inside multi-line pytest output embedded
+    in a run's failure reason)."""
+    md = "\n".join(
+        [
+            "some reason text:",
+            "        # RED in the seed: the bug brief's scope.",
+            "    - indented list item",
+            "    | indented | table |",
+            "tail line",
+        ]
+    )
+    html = _md_to_html(md)  # must terminate
+    assert "# RED in the seed" in html
+    assert "<li>indented list item</li>" in html
+    assert "<th>indented</th>" in html
+    assert "<th>table</th>" in html
 
 
 def test_html_glossary_tooltips_overlap_warning_kept(tmp_path: Path) -> None:

@@ -756,6 +756,13 @@ def _md_to_html(md: str) -> str:
             ):
                 paragraph.append(_md_inline(lines[i]))
                 i += 1
+            if not paragraph:
+                # An indented `#`/`- `/`|` line misses the unstripped
+                # outer dispatch but the stripped exclusion above, so
+                # the loop body never ran — emit it raw or `i` never
+                # advances and the outer loop spins forever.
+                paragraph.append(lines[i])
+                i += 1
             out.append("<p>" + "<br>".join(paragraph) + "</p>")
     out.append("</body></html>")
     return "\n".join(out)
