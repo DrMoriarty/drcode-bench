@@ -89,18 +89,28 @@ def _describe_plan(args: argparse.Namespace) -> str:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    """`bench report` — runs/ → report.md (§10), optionally + .html."""
-    from .report import generate_report
+    """`bench report` — runs/ → report.md (§10), optionally + .html.
+    `--matrix` loads optional per-model prices (`price_input` /
+    `price_output`, $ per 1M tokens) for the quality ranking's cost
+    axis; `--time-weight` is its α (default 0 = money only)."""
+    from .report import generate_report, load_pricing
 
     runs_dir = Path(args.runs_dir)
     print(f"runs dir: {runs_dir.resolve()}")
     if not runs_dir.is_dir():
         print("note: the directory does not exist yet — no runs recorded.")
         return 0
+    try:
+        pricing = load_pricing(Path(args.matrix)) if args.matrix else None
+    except MatrixError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     out = generate_report(
         runs_dir,
         out=Path(args.out) if args.out else None,
         html=args.html,
+        pricing=pricing,
+        time_weight=args.time_weight,
     )
     print(f"report:   {out.resolve()}")
     return 0
@@ -139,6 +149,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--html",
         action="store_true",
         help="also write an HTML version next to the markdown report",
+    )
+    report.add_argument(
+        "--matrix",
+        default="",
+        help="path to matrix.toml with optional per-model prices "
+        "(price_input/price_output, $ per 1M tokens) — enables the cost $ "
+        "and quality-score columns; without it the money axis renders as '—'",
+    )
+    report.add_argument(
+        "--time-weight",
+        type=float,
+        default=0.0,
+        help="α weight of the normalized wall-time in the quality score "
+        "cost = α·t_norm + β·m_norm (default 0 — money only; β fixed at 1)",
     )
     report.set_defaults(func=_cmd_report)
 

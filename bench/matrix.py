@@ -60,6 +60,12 @@ class ModelSpec:
     compaction pressure lives in the scenario's `[context]` section, which
     needs no second catalog entry. Kept (with tests) as a generic
     capability of the matrix parser.
+
+    `price_input` / `price_output` (optional, $ per 1M tokens) feed the
+    report's quality ranking (§10: cost = α·t_norm + β·m_norm). A model
+    missing EITHER price has NO price — the report renders its money axis
+    as "—" and keeps the pair out of money-based ranking. Both fields
+    absent (the default) keeps every existing matrix.toml valid.
     """
 
     provider: str
@@ -68,6 +74,13 @@ class ModelSpec:
     max_tokens: int | None = None
     compaction_threshold: int | None = None
     model: str = ""
+    price_input: float | None = None
+    price_output: float | None = None
+
+    @property
+    def is_priced(self) -> bool:
+        """True when BOTH prices are set (a half-priced model is unpriced)."""
+        return self.price_input is not None and self.price_output is not None
 
     @property
     def wire_name(self) -> str:
@@ -271,6 +284,21 @@ def check_research_override_assigned(
         )
 
 
+def _parse_price(value: object, where: str) -> float | None:
+    """Optional per-model price ($ per 1M tokens): absent = no price,
+    present = a non-negative number (a negative or non-numeric price is
+    a loud matrix error, not a silently unpriced model)."""
+    if value is None:
+        return None
+    try:
+        price = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise MatrixError(f"{where}: not a number: {value!r}") from None
+    if price < 0:
+        raise MatrixError(f"{where}: must be >= 0, got {price}")
+    return price
+
+
 def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
     """Parse matrix.toml → (providers by name, combos)."""
     try:
@@ -314,6 +342,12 @@ def load_matrix(path: Path) -> tuple[dict[str, ProviderSpec], list[Combo]]:
                 max_tokens=mraw.get("max_tokens"),
                 compaction_threshold=mraw.get("compaction_threshold"),
                 model=wire or "",
+                price_input=_parse_price(
+                    mraw.get("price_input"), f"{path}: model '{name}/{model_id}': price_input"
+                ),
+                price_output=_parse_price(
+                    mraw.get("price_output"), f"{path}: model '{name}/{model_id}': price_output"
+                ),
             )
         providers[name] = ProviderSpec(
             name=name,

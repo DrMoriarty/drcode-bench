@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from bench.report import (
     _md_to_html,
     _tokens_by_role,
@@ -260,7 +261,7 @@ def test_summary_links_to_representative_run(tmp_path: Path) -> None:
     assert "[3](r2/)" in text
     # Exactly one link in the whole summary table (the Runs table below
     # has its own per-run links, so count within the summary rows only).
-    summary_rows = [line for line in text.splitlines() if line.startswith("| s1 ")]
+    summary_rows = _summary_rows(text, "s1")
     assert len(summary_rows) == 1
     assert summary_rows[0].count("](r2/)") == 1
 
@@ -290,7 +291,10 @@ def test_generate_report_html(tmp_path: Path) -> None:
 
 
 def _summary_rows(text: str, scenario: str) -> list[str]:
-    return [line for line in text.splitlines() if line.startswith(f"| {scenario} ")]
+    """Summary-table rows of one scenario — scoped to the Summary section
+    (the scenario-winner table below also has `| <scenario> |` rows)."""
+    summary = text.split("## Summary", 1)[1].split("## Scenario winners", 1)[0]
+    return [line for line in summary.splitlines() if line.startswith(f"| {scenario} ")]
 
 
 def test_summary_wall_time_whole_seconds_with_spread(tmp_path: Path) -> None:
@@ -480,13 +484,14 @@ def test_html_spread_on_second_line(tmp_path: Path) -> None:
 
 def test_html_plain_cells_not_transformed(tmp_path: Path) -> None:
     """Non-numeric cells (combos, verdicts, prose with parentheses) must
-    stay untouched by the spread rendering."""
+    stay untouched by the spread rendering; the combo cell carries the
+    ◉ Pareto marker (a lone green pair is trivially non-dominated)."""
     _write_run(tmp_path, make_metrics("r1", "s1", "c1"))
     out = generate_report(tmp_path, html=True)
     text = out.with_suffix(".html").read_text(encoding="utf-8")
     assert '<span class="spread">' not in text
     assert "<td>green</td>" in text
-    assert "<td>c1</td>" in text
+    assert "<td>◉ c1</td>" in text
 
 
 def test_report_has_glossary_section(tmp_path: Path) -> None:
@@ -525,7 +530,7 @@ def test_html_glossary_tooltips(tmp_path: Path) -> None:
     assert ">clean</abbr>" in text
     # Non-glossary cells are untouched by the tooltip pass.
     assert "<td>green</td>" in text
-    assert "<td>c1</td>" in text
+    assert "<td>◉ c1</td>" in text
 
 
 def test_html_indented_block_line_terminates_paragraph() -> None:
@@ -559,3 +564,344 @@ def test_html_glossary_tooltips_overlap_warning_kept(tmp_path: Path) -> None:
     out = generate_report(tmp_path, html=True)
     text = out.with_suffix(".html").read_text(encoding="utf-8")
     assert ">OVERLAP</abbr> ⚠" in text
+
+
+# -- quality ranking: cost $, score = α·t_norm + β·m_norm, Pareto (§10) --------------
+
+PRICED_MATRIX = """\
+[providers.fake-a]
+base_url = "http://fake-a.local:9000/v1"
+
+[providers.fake-a.models.model-a]
+price_input = 1.0
+price_output = 1.0
+
+[providers.fake-a.models.model-b]
+price_input = 3.0
+price_output = 3.0
+
+[providers.fake-a.models.model-free]
+
+[[combo]]
+name   = "priced"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "pricey"
+coding = "fake-a/model-b"
+tester = "fake-a/model-b"
+compaction = "fake-a/model-b"
+
+[[combo]]
+name   = "unpriced"
+coding = "fake-a/model-free"
+tester = "fake-a/model-free"
+compaction = "fake-a/model-free"
+
+[[combo]]
+name   = "fast"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "cheap"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "slow"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "ufast"
+coding = "fake-a/model-free"
+tester = "fake-a/model-free"
+compaction = "fake-a/model-free"
+
+[[combo]]
+name   = "uslow"
+coding = "fake-a/model-free"
+tester = "fake-a/model-free"
+compaction = "fake-a/model-free"
+
+[[combo]]
+name   = "mixed"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "tie-1"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name   = "tie-2"
+coding = "fake-a/model-a"
+tester = "fake-a/model-a"
+compaction = "fake-a/model-a"
+"""
+
+
+@pytest.fixture
+def pricing(tmp_path: Path):  # -> Pricing
+    from bench.report import load_pricing
+
+    path = tmp_path / "matrix.toml"
+    path.write_text(PRICED_MATRIX, encoding="utf-8")
+    return load_pricing(path)
+
+
+def _traffic(model: str, inp: int, out: int) -> dict:
+    return make_model_log(
+        {
+            f"{model}@http://fake-a.local:9000/v1": {
+                "requests": 1,
+                "input_tokens": inp,
+                "output_tokens": out,
+            }
+        }
+    )
+
+
+def _pairs_by_combo(runs: list[dict], pricing=None, time_weight: float = 0.0) -> dict:
+    pairs = aggregate_pairs(runs, pricing, time_weight)
+    return {p["combo"]: p for p in pairs}
+
+
+def test_cost_aggregation_priced_and_unpriced(pricing) -> None:
+    """cost $ = Σ per-role input·price_in + output·price_out, median over
+    the repeats. An unpriced model (in the combo or only in the traffic)
+    → no cost at all; a combo unknown to `--matrix` → no cost either."""
+    runs = [
+        make_metrics("r1", "s1", "priced", model_log=_traffic("model-a", 2_000_000, 1_000_000)),
+        make_metrics("r2", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+        make_metrics("r3", "s1", "unpriced", model_log=_traffic("model-free", 1_000_000, 0)),
+        # combo 'ghost' is not in the matrix → eligibility fails
+        make_metrics("r4", "s1", "ghost", model_log=_traffic("model-a", 1_000_000, 0)),
+    ]
+    pairs = _pairs_by_combo(runs, pricing)
+    # priced: (2·1+1·1 + 1·1+1·1) / 2 → median 2.5, spread 2…3
+    assert pairs["priced"]["cost_usd"] == {"n": 2, "median": 2.5, "min": 2.0, "max": 3.0}
+    assert pairs["unpriced"]["cost_usd"]["median"] is None
+    assert pairs["ghost"]["cost_usd"]["median"] is None
+    # pass_rate: share of green repeats
+    assert pairs["priced"]["pass_rate"] == 1.0
+    runs[1]["verdict"] = "failed"
+    assert _pairs_by_combo(runs, pricing)["priced"]["pass_rate"] == 0.5
+
+
+def test_cost_column_and_unpriced_dash(tmp_path: Path, pricing) -> None:
+    """Summary table: cost/score cells render via the spread helper; an
+    unpriced pair renders `—` and stays in the table."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    )
+    _write_run(
+        tmp_path,
+        make_metrics("r2", "s1", "unpriced", model_log=_traffic("model-free", 1_000_000, 0)),
+    )
+    text = generate_report(tmp_path, pricing=pricing).read_text(encoding="utf-8")
+    summary = text.split("## Summary", 1)[1].split("## Scenario winners", 1)[0]
+    (priced_row,) = [r for r in summary.splitlines() if "| ◉ priced " in r]
+    (unpriced_row,) = [r for r in summary.splitlines() if "unpriced " in r]
+    assert "| $2 | 1 |" in priced_row  # single run → median only, no spread
+    assert "| 100% | — | — |" in unpriced_row
+    # the scenario-winner view keeps both, with the t_norm/m_norm factors
+    assert "t_norm" in text and "m_norm" in text
+
+
+def test_pareto_frontier(pricing) -> None:
+    """Frontier over (median wall-time, median cost $) among GREEN pairs:
+    fast/cheap both non-dominated, a slow+expensive pair is dominated, an
+    unpriced pair is eligible on the time axis only, a non-green pair is
+    never on the frontier."""
+    runs = [
+        make_metrics(
+            "r-fast",
+            "s2",
+            "fast",
+            wall_time_s={"settle": 100.0},
+            model_log=_traffic("model-a", 4_000_000, 1_000_000),
+        ),
+        make_metrics(
+            "r-cheap",
+            "s2",
+            "cheap",
+            wall_time_s={"settle": 200.0},
+            model_log=_traffic("model-a", 1_500_000, 500_000),
+        ),
+        make_metrics(
+            "r-slow",
+            "s2",
+            "slow",
+            wall_time_s={"settle": 300.0},
+            model_log=_traffic("model-a", 6_000_000, 0),
+        ),
+        make_metrics(
+            "r-ufast",
+            "s2",
+            "ufast",
+            wall_time_s={"settle": 50.0},
+            model_log=_traffic("model-free", 1_000_000, 0),
+        ),
+        make_metrics(
+            "r-uslow",
+            "s2",
+            "uslow",
+            wall_time_s={"settle": 150.0},
+            model_log=_traffic("model-free", 1_000_000, 0),
+        ),
+        make_metrics(
+            "r-fail",
+            "s2",
+            "priced",
+            verdict="failed",
+            wall_time_s={"settle": 10.0},
+            model_log=_traffic("model-a", 500_000, 0),
+        ),
+    ]
+    pairs = _pairs_by_combo(runs, pricing)
+    assert pairs["fast"]["pareto"] and pairs["cheap"]["pareto"]
+    assert not pairs["slow"]["pareto"]  # dominated by `fast` on both axes
+    assert pairs["ufast"]["pareto"]  # nothing priced is faster
+    assert not pairs["uslow"]["pareto"]  # `fast` (t=100) is strictly faster
+    assert not pairs["priced"]["pareto"]  # not green → never on the frontier
+
+
+def test_ranking_outcome_beats_pass_rate_beats_cost(tmp_path: Path, pricing) -> None:
+    """Lexicographic ranking in the scenario-winner table: outcome class
+    first, then pass rate, then cost; full ties keep the combo order."""
+    runs = [
+        make_metrics(
+            "r-m1",
+            "s1",
+            "mixed",
+            verdict="green",
+            model_log=_traffic("model-a", 1_000_000, 1_000_000),
+        ),
+        make_metrics(
+            "r-m2",
+            "s1",
+            "mixed",
+            verdict="failed",
+            model_log=_traffic("model-a", 1_000_000, 1_000_000),
+        ),
+        make_metrics("r-b", "s1", "pricey", model_log=_traffic("model-b", 1_000_000, 1_000_000)),
+        make_metrics("r-c", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+        make_metrics("r-d", "s1", "tie-1", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+        make_metrics("r-e", "s1", "tie-2", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    ]
+    _write_run(tmp_path, runs[0])
+    for m in runs[1:]:
+        _write_run(tmp_path, m)
+    text = generate_report(tmp_path, pricing=pricing).read_text(encoding="utf-8")
+    winners = text.split("## Scenario winners", 1)[1].split("## Runs", 1)[0]
+    order = [
+        line.split("|")[3].strip() for line in winners.splitlines() if line.startswith("| s1 |")
+    ]
+    assert order == ["priced", "tie-1", "tie-2", "pricey", "mixed"]
+
+
+def test_score_money_only_default_and_time_weight(pricing) -> None:
+    """α = 0 (default): score = m_norm only. A non-zero --time-weight
+    mixes in the normalized wall-time and can flip the winner."""
+    runs = [
+        make_metrics(
+            "r-f",
+            "s3",
+            "fast",
+            wall_time_s={"settle": 100.0},
+            model_log=_traffic("model-a", 4_000_000, 1_000_000),
+        ),
+        make_metrics(
+            "r-c",
+            "s3",
+            "cheap",
+            wall_time_s={"settle": 200.0},
+            model_log=_traffic("model-a", 1_500_000, 500_000),
+        ),
+    ]
+    # costs: fast = 5.0, cheap = 2.0 → m_min = 2, t_min = 100
+    money = _pairs_by_combo(runs, pricing)
+    assert money["cheap"]["quality_score"]["median"] == 1.0
+    assert money["fast"]["quality_score"]["median"] == 2.5
+    assert money["cheap"]["m_norm"] == 1.0 and money["cheap"]["t_norm"] == 2.0
+    assert money["fast"]["m_norm"] == 2.5 and money["fast"]["t_norm"] == 1.0
+    # α = 0.5: cheap = 0.5·2 + 1 = 2, fast = 0.5·1 + 2.5 = 3 → cheap still wins
+    half = _pairs_by_combo(runs, pricing, time_weight=0.5)
+    assert half["cheap"]["quality_score"]["median"] == 2.0
+    assert half["fast"]["quality_score"]["median"] == 3.0
+    # α = 2: cheap = 2·2 + 1 = 5, fast = 2·1 + 2.5 = 4.5 → fast wins
+    timed = _pairs_by_combo(runs, pricing, time_weight=2.0)
+    assert timed["fast"]["quality_score"]["median"] < timed["cheap"]["quality_score"]["median"]
+
+
+def test_html_spread_for_cost_and_score(tmp_path: Path, pricing) -> None:
+    """Cost and score cells carry `$` prefixes / decimals — the HTML
+    rendering still splits their spread onto the second line."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    )
+    _write_run(
+        tmp_path,
+        make_metrics("r2", "s1", "priced", model_log=_traffic("model-a", 2_000_000, 1_000_000)),
+    )
+    text = (
+        generate_report(tmp_path, pricing=pricing, html=True)
+        .with_suffix(".html")
+        .read_text(encoding="utf-8")
+    )
+    # costs 2.0 / 3.0 → median $2.5, spread $2–$3; α=0 scores are the
+    # per-repeat costs over the scenario's best pair median (2.5):
+    # 0.8 / 1.2 → median 1, spread 0.8–1.2
+    assert '<span class="spread">$2–$3</span>' in text
+    assert '<span class="spread">0.8–1.2</span>' in text
+
+
+def test_glossary_explains_ranking(tmp_path: Path, pricing) -> None:
+    """The ◉ Pareto marker and the ordinal-score caveat are spelled out
+    in the Glossary section."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    )
+    text = generate_report(tmp_path, pricing=pricing).read_text(encoding="utf-8")
+    assert "combo `◉`" in text
+    assert "Pareto frontier" in text
+    assert "RANKING, not a ratio" in text
+
+
+def test_cli_report_matrix_and_time_weight(tmp_path: Path) -> None:
+    """`--matrix` / `--time-weight` wiring: parsed into the report call;
+    a priced run shows the $ column, a bad matrix is a planning error."""
+    from bench import cli
+
+    args = cli.build_parser().parse_args(
+        ["report", "runs", "--matrix", "m.toml", "--time-weight", "0.5"]
+    )
+    assert (args.matrix, args.time_weight) == ("m.toml", 0.5)
+
+    matrix = tmp_path / "matrix.toml"
+    matrix.write_text(PRICED_MATRIX, encoding="utf-8")
+    _write_run(
+        tmp_path / "runs",
+        make_metrics("r1", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    )
+    rc = cli.main(["report", str(tmp_path / "runs"), "--matrix", str(matrix)])
+    assert rc == 0
+    text = (tmp_path / "runs" / "report.md").read_text(encoding="utf-8")
+    assert "$2" in text and "Scenario winners" in text
+    # a matrix path that does not parse → planning error, exit code 2
+    assert (
+        cli.main(["report", str(tmp_path / "runs"), "--matrix", str(tmp_path / "nope.toml")]) == 2
+    )

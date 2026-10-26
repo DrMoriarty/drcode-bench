@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from bench.matrix import ROLES, MatrixError, load_matrix
+from bench.report import load_pricing
 
 ALIAS_MATRIX = """\
 [providers.fake-b]
@@ -222,3 +223,135 @@ def test_research_override_without_role_is_an_error(tmp_path: Path) -> None:
     path.write_text(matrix, encoding="utf-8")
     with pytest.raises(MatrixError, match="assigns no 'research' role"):
         load_matrix(path)
+
+
+# -- optional per-model prices (§10 quality ranking) --------------------------------
+
+PRICED_MATRIX = """\
+[providers.fake-a]
+base_url = "http://fake-a.local:9000/v1"
+
+[providers.fake-a.models.model-a]
+price_input = 1.0
+price_output = 1.0
+
+[providers.fake-a.models.model-b]
+price_input = 3.0
+price_output = 3.0
+
+[providers.fake-a.models.model-free]
+
+[[combo]]
+name       = "priced"
+coding     = "fake-a/model-a"
+tester     = "fake-a/model-a"
+compaction = "fake-a/model-a"
+
+[[combo]]
+name       = "pricey"
+coding     = "fake-a/model-b"
+tester     = "fake-a/model-b"
+compaction = "fake-a/model-b"
+
+[[combo]]
+name       = "unpriced"
+coding     = "fake-a/model-free"
+tester     = "fake-a/model-free"
+compaction = "fake-a/model-free"
+"""
+
+
+@pytest.fixture
+def priced_matrix_file(tmp_path: Path) -> Path:
+    path = tmp_path / "matrix.toml"
+    path.write_text(PRICED_MATRIX, encoding="utf-8")
+    return path
+
+
+def test_model_price_defaults_to_none(tmp_path: Path) -> None:
+    """No price fields: the model has NO price (backwards compatible —
+    every existing matrix.toml keeps working, prices stay optional)."""
+    providers, _ = load_matrix(research_matrix_file_of(tmp_path))
+    spec = providers["fake-a"].model("big-coder")
+    assert spec.price_input is None and spec.price_output is None
+    assert not spec.is_priced
+
+
+def research_matrix_file_of(tmp_path: Path) -> Path:
+    path = tmp_path / "research-matrix.toml"
+    path.write_text(RESEARCH_MATRIX, encoding="utf-8")
+    return path
+
+
+def test_model_prices_parse(priced_matrix_file: Path) -> None:
+    """`price_input` / `price_output` ($ per 1M tokens) land on the spec;
+    a model missing either field is unpriced (half-priced = unpriced)."""
+    providers, _ = load_matrix(priced_matrix_file)
+    a = providers["fake-a"].model("model-a")
+    assert (a.price_input, a.price_output) == (1.0, 1.0)
+    assert a.is_priced
+    assert not providers["fake-a"].model("model-free").is_priced
+
+
+@pytest.mark.parametrize(
+    ("snippet", "match"),
+    [
+        ("price_input = -1", "must be >= 0"),
+        ("price_output = -0.5", "must be >= 0"),
+        ('price_input = "expensive"', "not a number"),
+    ],
+)
+def test_model_price_validation(tmp_path: Path, snippet: str, match: str) -> None:
+    """A negative or non-numeric price is a loud matrix error, not a
+    silently unpriced model."""
+    matrix = PRICED_MATRIX.replace(
+        "[providers.fake-a.models.model-free]", f"[providers.fake-a.models.model-free]\n{snippet}"
+    )
+    path = tmp_path / "matrix.toml"
+    path.write_text(matrix, encoding="utf-8")
+    with pytest.raises(MatrixError, match=match):
+        load_matrix(path)
+
+
+def test_load_pricing_maps_models_and_combos(priced_matrix_file: Path) -> None:
+    """load_pricing: priced models are keyed by catalog id (recorder tags
+    strip to the wire name = id here); a combo with an unpriced role maps
+    to None → no cost for its pairs."""
+    pricing = load_pricing(priced_matrix_file)
+    assert set(pricing.models) == {"model-a", "model-b"}
+    assert pricing.models["model-a"].price_input == 1.0
+    assert set(pricing.combos) == {"priced", "pricey", "unpriced"}
+    assert pricing.combos["priced"] is not None
+    pricey = pricing.combos["pricey"]
+    assert pricey is not None and pricey["coding"].price_input == 3.0
+    assert pricing.combos["unpriced"] is None
+    # an unknown combo is simply absent → its pairs get no cost either
+    assert "no-such-combo" not in pricing.combos
+
+
+def test_load_pricing_alias_keyed_by_wire_name(tmp_path: Path) -> None:
+    """An alias entry (§8) is priced under its REAL wire name (what the
+    recorder tags carry); the catalog id maps to the same price too."""
+    matrix = """\
+[providers.fake-a]
+base_url = "http://fake-a.local:9000/v1"
+
+[providers.fake-a.models.alias-b]
+model = "model-b"
+price_input = 3.0
+price_output = 3.0
+
+[[combo]]
+name   = "pricey"
+coding = "fake-a/alias-b"
+tester = "fake-a/alias-b"
+compaction = "fake-a/alias-b"
+"""
+    path = tmp_path / "matrix.toml"
+    path.write_text(matrix, encoding="utf-8")
+    pricing = load_pricing(path)
+    assert set(pricing.models) == {"model-b", "alias-b"}
+    assert pricing.models["model-b"].price_input == 3.0  # wire name
+    assert pricing.models["alias-b"].price_input == 3.0  # catalog id too
+    pricey = pricing.combos["pricey"]
+    assert pricey is not None and pricey["coding"].price_output == 3.0

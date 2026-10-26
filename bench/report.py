@@ -24,6 +24,7 @@ import re
 import statistics
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -62,13 +63,20 @@ GLOSSARY: dict[str, str] = {
     "stuck-clarif": "task left pending clarification",
     "excluded": "task excluded from the queue",
     "clean": "none of the above",
+    "◉": (
+        "the pair is on its scenario's Pareto frontier over (median "
+        "wall-time, median cost $) among the green pairs — no green pair "
+        "of the scenario is both as fast and as cheap; a pair without a "
+        "price is frontier-eligible on the time axis only"
+    ),
 }
 
 # Which column each glossary term belongs to (for the Glossary section).
 _GLOSSARY_COLUMN: dict[str, str] = {
     "ok": "gate",
     "OVERLAP": "gate",
-    **{t: "stability" for t in GLOSSARY if t not in ("ok", "OVERLAP")},
+    "◉": "combo",
+    **{t: "stability" for t in GLOSSARY if t not in ("ok", "OVERLAP", "◉")},
 }
 
 # Terms always carrying a count in the cells — shown in the glossary with
@@ -77,16 +85,38 @@ _GLOSSARY_COUNTED = frozenset({"faults", "compact-fail", "tester-fail", "net-ret
 
 
 def _glossary_lines() -> list[str]:
-    """The '## Glossary' section: one line per terse code, in column order."""
+    """The '## Glossary' section: one line per terse code, in column order,
+    plus the quality-ranking notes (§10: the score is ordinal)."""
     lines = [
         "## Glossary",
         "",
-        "Meaning of the codes in the `gate` and `stability` columns:",
+        "Meaning of the codes in the tables above:",
         "",
     ]
     for term, definition in GLOSSARY.items():
         label = f"{term}×N" if term in _GLOSSARY_COUNTED else term
         lines.append(f"- {_GLOSSARY_COLUMN[term]} `{label}` — {definition}")
+    lines += [
+        "",
+        "Quality ranking notes:",
+        "",
+        "- `pass rate` — the share of the pair's repeats with verdict "
+        "`green` (the `verdicts` column already lists all outcomes seen; "
+        "a pair is only as good as its worst repeat).",
+        "- `score (α·t+β$)` — cost = α·t_norm + β·m_norm, where t_norm / "
+        "m_norm divide the pair's median wall-time / median cost by the "
+        "scenario's best pair (best → 1.0, so scores are comparable "
+        "across scenarios); α is the `--time-weight` (default 0 = money "
+        "only), β is fixed at 1. The cell shows the median over the "
+        "repeats of each repeat's normalized score, with the spread.",
+        "- With 1–3 repeats the score is a RANKING, not a ratio: treat "
+        "it as an ordinal 'which pair is better', never as '2× better'.",
+        "- `cost $ (med)` is computed only when every model referenced by "
+        "the combo has both `price_input` and `price_output` in the "
+        "matrix given via `--matrix`; unpriced pairs render `—` and rank "
+        "after priced ones (by wall-time) within the same outcome class "
+        "and pass rate.",
+    ]
     return lines
 
 
@@ -122,6 +152,211 @@ def _fmt(value: Any, suffix: str = "") -> str:
     if isinstance(value, float):
         return f"{value:g}{suffix}"
     return f"{value}{suffix}"
+
+
+# --- quality ranking: prices, cost, Pareto (§10) ------------------------------
+#
+# A synthetic "quality" ranking of (scenario, combo) pairs, scored by an
+# explicit cost function cost = α·t_norm + β·m_norm over the GREEN repeats.
+# The ranking itself is lexicographic, not a single scalar:
+#   1. outcome_class — the worst verdict over the pair's repeats
+#      (green > settled-but-flagged > failed/unknown);
+#   2. pass_rate — the share of green repeats;
+#   3. ascending cost among pairs equal on both.
+# t = the pair's median settle wall-time (which includes orchestration
+# noise; the per-task phases.dev_s/testing_s of metrics.analyze_phases is
+# the cleaner alternative — acceptable to keep settle for v1), m = the
+# pair's median cost in $ (Σ over roles of input·price_in +
+# output·price_out). t_norm / m_norm divide by the scenario's best pair,
+# so scores are comparable across scenarios.
+
+
+@dataclass(frozen=True)
+class ModelPrice:
+    """Price of one model, $ per 1M tokens (input, output)."""
+
+    price_input: float
+    price_output: float
+
+
+@dataclass(frozen=True)
+class Pricing:
+    """Model prices from matrix.toml, as the report consumes them.
+
+    `models` maps BOTH the catalog id and the wire name of every priced
+    model to its price (recorder role tags carry wire names);
+    `combos` maps a combo name to its roles' model prices — None when at
+    least one referenced model is unpriced (the pair then has NO cost:
+    the money axis renders as `—` and the pair is excluded from
+    money-based ranking but still shown with time)."""
+
+    models: dict[str, ModelPrice]
+    combos: dict[str, dict[str, ModelPrice] | None]
+
+
+def load_pricing(path: Path) -> Pricing:
+    """matrix.toml → `Pricing` (optional `price_input`/`price_output`,
+    $ per 1M tokens, per model entry)."""
+    from .matrix import load_matrix, parse_ref
+
+    providers, combos = load_matrix(path)
+    models: dict[str, ModelPrice] = {}
+    for provider in providers.values():
+        for spec in provider.models.values():
+            if not spec.is_priced:
+                continue
+            assert spec.price_input is not None and spec.price_output is not None
+            price = ModelPrice(spec.price_input, spec.price_output)
+            models[spec.wire_name] = price
+            models.setdefault(spec.id, price)  # alias id → same price; wire name wins
+    combo_prices: dict[str, dict[str, ModelPrice] | None] = {}
+    for combo in combos:
+        roles: dict[str, ModelPrice] = {}
+        for role, ref in combo.roles().items():
+            provider_name, model_id = parse_ref(ref, f"combo '{combo.name}' role {role}")
+            spec = providers[provider_name].model(model_id)
+            if not spec.is_priced:
+                roles = {}  # sentinel: unpriced role → combo has no cost
+                break
+            assert spec.price_input is not None and spec.price_output is not None
+            roles[role] = ModelPrice(spec.price_input, spec.price_output)
+        combo_prices[combo.name] = roles or None
+    return Pricing(models=models, combos=combo_prices)
+
+
+def _run_cost_usd(
+    metrics: dict[str, Any],
+    combo_prices: dict[str, ModelPrice] | None,
+    model_prices: dict[str, ModelPrice],
+) -> float | None:
+    """Cost in $ of ONE run: Σ over the recorder's per-role traffic of
+    (input·price_in + output·price_out). None when the combo references
+    an unpriced model, or the run's own traffic contains a model with no
+    price (conservative: a fallback model outside the combo roles)."""
+    if combo_prices is None:
+        return None
+    per_role = _model_log(metrics).get("per_role") or {}
+    if not per_role:
+        return None
+    total = 0.0
+    for tag, entry in per_role.items():
+        model = tag.split("@", 1)[0].strip() or tag  # same normalization as _tokens_by_role
+        price = model_prices.get(model)
+        if price is None:
+            return None
+        total += (
+            int(entry.get("input_tokens") or 0) * price.price_input
+            + int(entry.get("output_tokens") or 0) * price.price_output
+        ) / 1e6
+    return total
+
+
+# Verdict → outcome class rank: the worst verdict of a pair decides its
+# class (green > settled-but-flagged > failed/unknown).
+_OUTCOME_RANK: dict[str, int] = {
+    "green": 0,
+    "settled-but-flagged": 1,
+    "failed": 2,
+    "unknown": 2,
+}
+
+
+def _outcome_class(verdicts: list[str]) -> str:
+    """The worst verdict over the pair's repeats (its outcome class)."""
+    return max(verdicts, key=lambda v: (_OUTCOME_RANK.get(v, 2), v))
+
+
+def _rank_key(p: dict[str, Any]) -> tuple[int, float, int, float]:
+    """Lexicographic ranking of one pair (§10): outcome class first, then
+    pass rate (descending), then cost (ascending); unpriced pairs rank
+    after priced ones within the same (outcome, pass rate), by time."""
+    cost = p["cost_usd"]["median"]
+    time = p["wall_time_s"]["median"]
+    return (
+        _OUTCOME_RANK.get(p["outcome_class"], 2),
+        -p["pass_rate"],
+        0 if cost is not None else 1,
+        cost if cost is not None else (time if time is not None else float("inf")),
+    )
+
+
+def _pareto_frontier(group: list[dict[str, Any]]) -> set[int]:
+    """Indexes into `group` on the per-scenario Pareto frontier over
+    (median wall-time, median cost $) among the GREEN pairs. A pair with
+    no cost is frontier-eligible on the time axis only: it is dominated
+    when some priced green pair is strictly faster (its money axis is
+    unknown, so money cannot dominate it). Pairs with no time at all are
+    never eligible (nothing to compare)."""
+    green = [
+        i
+        for i, p in enumerate(group)
+        if p["verdicts"] == ["green"] and p["wall_time_s"]["median"] is not None
+    ]
+    front: set[int] = set()
+    for i in green:
+        ti = group[i]["wall_time_s"]["median"]
+        ci = group[i]["cost_usd"]["median"]
+        dominated = False
+        for j in green:
+            if j == i:
+                continue
+            tj = group[j]["wall_time_s"]["median"]
+            cj = group[j]["cost_usd"]["median"]
+            if cj is None:
+                continue  # an unpriced pair dominates nothing
+            if ci is not None:
+                if tj <= ti and cj <= ci and (tj < ti or cj < ci):
+                    dominated = True
+                    break
+            elif tj < ti:
+                dominated = True
+                break
+        if not dominated:
+            front.add(i)
+    return front
+
+
+def _apply_quality(
+    pairs: list[dict[str, Any]],
+    raw: dict[tuple[str, str], tuple[list[Any], list[Any]]],
+    time_weight: float,
+) -> None:
+    """Attach the scenario-relative quality figures to the aggregated
+    pairs (in place): `t_norm`/`m_norm` (pair medians ÷ the scenario's
+    best), `quality_score` (per-repeat α·t_norm + β·m_norm, spread-aware)
+    and `pareto`. The per-repeat score uses the repeat's own t and $ over
+    the scenario's best pair medians — with α = 0 the median of the
+    per-repeat scores IS the pair's m_norm (the median commutes with the
+    positive scaling); with α > 0 it is the spread-ready equivalent."""
+    by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for p in pairs:
+        by_scenario.setdefault(p["scenario"], []).append(p)
+    for group in by_scenario.values():
+        times = [p["wall_time_s"]["median"] for p in group]
+        costs = [p["cost_usd"]["median"] for p in group]
+        t_min = min((t for t in times if t is not None), default=None)
+        m_min = min((c for c in costs if c is not None), default=None)
+        front = _pareto_frontier(group)
+        for i, p in enumerate(group):
+            t_med, m_med = times[i], costs[i]
+            # norms are display values (t_norm/m_norm columns) — keep them
+            # readable; the score itself divides unrounded
+            p["t_norm"] = round(t_med / t_min, 2) if t_min and t_med is not None else None
+            p["m_norm"] = round(m_med / m_min, 2) if m_min and m_med is not None else None
+            run_times, run_costs = raw[(p["scenario"], p["combo"])]
+            scores = [
+                time_weight * (t / t_min) + c / m_min
+                for t, c in zip(run_times, run_costs, strict=False)
+                if t is not None and c is not None and t_min and m_min
+            ]
+            p["quality_score"] = _agg(scores) if scores else _agg([None] * len(run_times))
+            p["pareto"] = i in front
+
+
+def _dollar(value: Any) -> str:
+    """Cost cell: `$0.123` (4 significant digits — run costs are small);
+    `—` for missing values."""
+    return "—" if value is None else f"${float(value):.4g}"
 
 
 def discover_runs(runs_dir: Path) -> list[Path]:
@@ -237,7 +472,11 @@ def _agg(values: list[float | int | None]) -> dict[str, Any]:
     }
 
 
-def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def aggregate_pairs(
+    runs: list[dict[str, Any]],
+    pricing: Pricing | None = None,
+    time_weight: float = 0.0,
+) -> list[dict[str, Any]]:
     """Group runs by (scenario, combo) and aggregate the report metrics.
 
     Shape is repeat-ready: every pair carries `_agg` blocks for wall-time,
@@ -246,15 +485,38 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     the run details); verdicts list all
     outcomes seen across the repeats (a pair is only as good as its worst
     repeat). `repr_run` is the median-wall repeat — the run whose
-    artifacts the summary table links to."""
+    artifacts the summary table links to.
+
+    Quality ranking (§10): `pass_rate` — the share of green repeats;
+    `outcome_class` — the worst verdict over the repeats;
+    `cost_usd` — median $ per run (None for every repeat when `pricing`
+    is absent or the combo references an unpriced model);
+    `quality_score` — per-repeat α·t_norm + β·m_norm (`time_weight` = α,
+    β = 1; the money-only default α = 0 is the only externally
+    justifiable collapse, α > 0 is opt-in); `pareto` — on the scenario's
+    Pareto frontier over (median wall-time, median cost $) among green
+    pairs. The settle wall-time includes orchestration noise (the
+    per-task phases.dev_s/testing_s of metrics.analyze_phases is the
+    cleaner alternative — acceptable for v1)."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for m in runs:
         key = (m.get("scenario") or "?", m.get("combo") or "?")
         groups.setdefault(key, []).append(m)
 
     pairs = []
+    raw: dict[tuple[str, str], tuple[list[Any], list[Any]]] = {}
     for (scenario, combo), group in sorted(groups.items()):
-        wall = _agg([m.get("wall_time_s", {}).get("settle") for m in group])
+        run_times = [m.get("wall_time_s", {}).get("settle") for m in group]
+        run_costs = [
+            _run_cost_usd(
+                m,
+                pricing.combos.get(combo) if pricing else None,
+                pricing.models if pricing else {},
+            )
+            for m in group
+        ]
+        raw[(scenario, combo)] = (run_times, run_costs)
+        wall = _agg(run_times)
         compactions = _agg([(m.get("totals") or {}).get("n_compactions") for m in group])
         rounds = _agg([(m.get("totals") or {}).get("n_testing_rounds") for m in group])
         round_trips = _agg([len(m.get("bug_round_trips") or []) for m in group])
@@ -263,13 +525,17 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             [((m.get("totals") or {}).get("usage") or {}).get("output_tokens") for m in group]
         )
         requests = _agg([_model_log(m).get("requests") for m in group])
+        verdicts = sorted({m.get("verdict") or "unknown" for m in group})
         pairs.append(
             {
                 "scenario": scenario,
                 "combo": combo,
                 "runs": [m.get("run_id") for m in group],
                 "repr_run": _representative_run(group, wall),
-                "verdicts": sorted({m.get("verdict") or "unknown" for m in group}),
+                "verdicts": verdicts,
+                "outcome_class": _outcome_class(verdicts),
+                "pass_rate": sum(1 for m in group if (m.get("verdict")) == "green") / len(group),
+                "cost_usd": _agg(run_costs),
                 "wall_time_s": wall,
                 "compactions": compactions,
                 "testing_rounds": rounds,
@@ -282,6 +548,7 @@ def aggregate_pairs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "stability": sorted({_stability_flags(m) for m in group} - {"clean"}) or ["clean"],
             }
         )
+    _apply_quality(pairs, raw, time_weight)
     return pairs
 
 
@@ -339,20 +606,25 @@ def _with_spread(agg: dict[str, Any], fmt: Callable[[Any], str] = _fmt) -> str:
 
 def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| scenario | combo | runs | verdicts | wall-time (median, s) | "
+        "| scenario | combo | runs | verdicts | pass rate | cost $ (med) | "
+        "score (α·t+β$) | wall-time (median, s) | "
         "compactions (med) | testing rounds (med) | bug round-trips (med) | "
         "sim interventions (med) | output tokens (med) | "
         "model requests (med) | tokens by role (med, prompt/compl.) | gate | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
         tokens_by_role = "; ".join(
             f"{role}: {_thousands(v['input_tokens_median'])}/{_thousands(v['output_tokens_median'])}"
             for role, v in p["tokens_by_role"].items()
         )
+        pareto = "◉ " if p["pareto"] else ""
         lines.append(
-            f"| {p['scenario']} | {p['combo']} | {_run_count_cell(p)} "
+            f"| {p['scenario']} | {pareto}{p['combo']} | {_run_count_cell(p)} "
             f"| {', '.join(p['verdicts'])} "
+            f"| {p['pass_rate']:.0%} "
+            f"| {_with_spread(p['cost_usd'], _dollar)} "
+            f"| {_with_spread(p['quality_score'])} "
             f"| {_with_spread(p['wall_time_s'], _sec_whole)} "
             f"| {_with_spread(p['compactions'])} "
             f"| {_fmt(p['testing_rounds']['median'])} "
@@ -364,6 +636,43 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             f"| {', '.join(p['gate'])} "
             f"| {', '.join(p['stability'])} |"
         )
+    return lines
+
+
+def _winner_rows(pairs: list[dict[str, Any]]) -> list[str]:
+    """The per-scenario 'scenario winner' view (§10): combos ranked by
+    (outcome_class, pass_rate, cost), with the t_norm / m_norm factors
+    shown so the reader sees WHY a combo won — faster? cheaper? both."""
+    lines = [
+        "## Scenario winners (quality ranking)",
+        "",
+        "Per scenario, the combos ranked lexicographically by (worst verdict, "
+        "pass rate, cost): green beats settled-but-flagged beats "
+        "failed/unknown, then the share of green repeats, then ascending "
+        "cost = α·t_norm + β·m_norm (α = `--time-weight`, default 0 = money "
+        "only; β fixed at 1). t_norm / m_norm — the pair's median wall-time "
+        "/ cost relative to the scenario's best pair (best → 1.0); unpriced "
+        "pairs (`—`) rank after priced ones by wall-time.",
+        "",
+        "| scenario | rank | combo | outcome | pass rate | wall-time (med, s) "
+        "| cost $ (med) | t_norm | m_norm | score |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for p in pairs:
+        by_scenario.setdefault(p["scenario"], []).append(p)
+    for scenario in sorted(by_scenario):
+        ranked = sorted(by_scenario[scenario], key=_rank_key)
+        for rank, p in enumerate(ranked, start=1):
+            lines.append(
+                f"| {scenario} | {rank} | {p['combo']} | {p['outcome_class']} "
+                f"| {p['pass_rate']:.0%} "
+                f"| {_fmt(p['wall_time_s']['median'])} "
+                f"| {_dollar(p['cost_usd']['median'])} "
+                f"| {_fmt(p['t_norm'])} "
+                f"| {_fmt(p['m_norm'])} "
+                f"| {_fmt(p['quality_score']['median'])} |"
+            )
     return lines
 
 
@@ -546,9 +855,19 @@ def _run_details(runs: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = False) -> Path:
+def generate_report(
+    runs_dir: Path,
+    out: Path | None = None,
+    *,
+    html: bool = False,
+    pricing: Pricing | None = None,
+    time_weight: float = 0.0,
+) -> Path:
     """Scan `runs_dir`, extract missing metrics, write the markdown report
     (and, with `html=True`, an HTML rendering next to it).
+    `pricing` (optional, `load_pricing(matrix.toml)`) enables the cost $
+    and score columns of the quality ranking (§10); `time_weight` is the
+    α of cost = α·t_norm + β·m_norm (default 0 = money only).
     Returns the path of the written markdown report
     (default: `<runs_dir>/report.md`)."""
     runs_dir = Path(runs_dir)
@@ -556,7 +875,7 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
 
     run_dirs = discover_runs(runs_dir)
     runs = [load_run(d) for d in run_dirs]
-    pairs = aggregate_pairs(runs)
+    pairs = aggregate_pairs(runs, pricing, time_weight)
 
     lines = [
         "# drcode-bench report",
@@ -570,6 +889,9 @@ def generate_report(runs_dir: Path, out: Path | None = None, *, html: bool = Fal
         "The run count links to the artifacts of the pair's median-wall run.",
         "",
         *_pair_rows(pairs),
+        "",
+        # §10: the normalized per-scenario view — why a combo won.
+        *_winner_rows(pairs),
         "",
         "## Runs",
         "",
@@ -634,10 +956,11 @@ def _verdict_row_class(cell: str) -> str | None:
 
 
 # Summary-table spread cells (`23 (19–26)`, thousands separated by
-# thin spaces) — rendered in HTML as the median on the first line and
-# the min–max spread on a small gray second line.
-_SPREAD_CELL_RE = re.compile(r"^(\d[\d\u202f ]*) \((\d[\d\u202f ]*–\d[\d\u202f ]+)\)$")
-_PLAIN_NUMBER_RE = re.compile(r"^\d+([\u202f ]\d+)*$")
+# thin spaces; the cost/score cells add `$` prefixes and decimals) —
+# rendered in HTML as the median on the first line and the min–max
+# spread on a small gray second line.
+_SPREAD_CELL_RE = re.compile(r"^(\$?[\d\u202f.]+) \((\$?[\d\u202f.]+–\$?[\d\u202f.]+)\)$")
+_PLAIN_NUMBER_RE = re.compile(r"^\$?[\d\u202f.]+$")
 
 
 def _render_cell(cell: str, *, summary: bool, glossary: bool = False) -> str:
