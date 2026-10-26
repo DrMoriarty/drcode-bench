@@ -23,6 +23,18 @@
 # is deliberately ADDITIVE w.r.t. pad()'s own pinned contract (test_pad
 # pins only short strings) — otherwise the coder's round 1 would break
 # test_pad too and the "one dependent test breaks" design would blur.
+#
+# NB (second): the constraints are staged BY ROUND. Round 1 ("fix_only_
+# pad") forbids touching anything but pad() — the dependent breakage is
+# EXPECTED there and is resolved through the tester's fix-loop report,
+# not preemptively. Round 2 (the task returned with the tester's
+# regression report) explicitly ALLOWS/REQUIRES touching the dependent
+# functions (row() named, "test_row" still not) and FORBIDS reverting
+# pad()'s truncation — otherwise a real (non-scripted) coder reads the
+# brief as self-contradictory ("only pad()" + "PASSED only on green
+# pytest") and refuses to act in round 2, exhausting max_dev_rounds; or
+# "repairs" by reverting round 1, which kills the scenario's point while
+# leaving pytest green (checks.py does not catch a revert mechanically).
 
 id = "s8_fix_loop"
 timeout = 45  # minutes — soft limit (§4: 30–60 min)
@@ -37,10 +49,12 @@ text = """
 (дополнение пробелами сохраняется): pad("abcdefgh", 5) должна
 возвращать "abcde". Сигнатуру сохраните.
 
-Изменения вносите ТОЛЬКО в pad(): остальные функции модуля (в том числе
-row()) не трогайте, даже если полный `pytest` после правки останется
-красным из-за них. Точечная самопроверка кодера:
-`pytest test_fmt.py::test_pad` — она должна быть зелёной.
+Этап первичной правки (сейчас): изменения вносите ТОЛЬКО в pad(),
+остальные функции модуля (в том числе row()) не трогайте. Если после
+правки полный `pytest` останется красным из-за других функций — это
+ожидаемо, чинить их превентивно не нужно: красный тест разберут на
+проверке. Точечная самопроверка кодера: `pytest test_fmt.py::test_pad`
+— она должна быть зелёной.
 
 Правило верификации (обязательное, адресовано проверке задачи): прогоните
 ПОЛНЫЙ `pytest` в корне задачи. Если упавший тест связан с правками самой
@@ -48,6 +62,15 @@ row()) не трогайте, даже если полный `pytest` после
 задачу в разработку своим вердиктом с отчётом (какая команда упала и что
 вывела), заводить отдельный отчёт о дефекте не нужно. Вердикт «проверка
 пройдена» возможен ТОЛЬКО при полностью зелёном `pytest`.
+
+Правило для возврата в разработку (если задача вернулась к вам из
+проверки с отчётом о регрессии, вызванной вашей первичной правкой):
+устраните регрессию МИНИМАЛЬНОЙ правкой, чтобы полный `pytest` стал
+зелёным. Новое поведение pad() (обрезка длинных строк) — обязательная
+часть задачи: НЕ откатывайте его и pad() больше не меняйте. Ремонтировать
+нужно зависимые функции, затронутые новым pad() (в том числе row()): на
+этом этапе их правка разрешена и требуется — они должны вернуть себе
+прежний контракт, не полагаясь на новое поведение pad().
 """
 
 [settle]
