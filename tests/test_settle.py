@@ -9,8 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bench.scenario import Scenario
-from bench.settle import SettleError, dump_diagnostics, settle_blocker, wait_settle
-from drcode.models import Task, TaskStatus, VerificationStatus
+from bench.settle import (
+    SettleError,
+    dead_task_blocker,
+    dump_diagnostics,
+    settle_blocker,
+    wait_settle,
+)
+from drcode.models import Task, TaskEvent, TaskStatus, VerificationStatus
 
 
 def make_scenario(**settle) -> Scenario:
@@ -178,6 +184,106 @@ async def test_wait_settle_broken_app_is_error() -> None:
         assert "settle check crashed" in str(e)
     else:
         raise AssertionError("expected SettleError")
+
+
+# -- dead tasks: deterministic context overflow (hard settle blocker) --------------
+
+# The real event pair drcode emits on a deterministic context overflow
+# (pipeline_agent_run: the raw error first, then the manual-intervention
+# diagnosis; the task goes back to the queue forever).
+_OVERFLOW_ERROR_EVENT = (
+    "ModelContextWindowExceededError: status_code: 400, model_name: x5, "
+    "body: {'detail': 'Error code: 400 - requested token count exceeds the "
+    "model's maximum context length of 262144 tokens'}"
+)
+_HTTP_OVERFLOW_ERROR_EVENT = (
+    "ModelHTTPError: status_code: 400, body: {'message': "
+    '"context_length_exceeded: reduce the length of the input"}'
+)
+_TRANSIENT_ERROR_EVENT = (
+    "ModelHTTPError: status_code: 429, body: {'message': 'rate limit exceeded, retry later'}"
+)
+_DEAD_TASK_MARKER_EVENT = (
+    "The transcript exceeds the model's context window: the model rejects "
+    "it deterministically on every attempt, retrying cannot help. The task "
+    "needs manual intervention — delete it, or shrink its transcript "
+    "(e.g. mechanical compaction)."
+)
+
+
+def task_with_events(*texts: str) -> Task:
+    t = Task(title="dead")
+    t.events = [TaskEvent(text=text) for text in texts]
+    return t
+
+
+def test_dead_task_blocker_fires_on_pair() -> None:
+    task = task_with_events("working…", _OVERFLOW_ERROR_EVENT, _DEAD_TASK_MARKER_EVENT)
+    reason = dead_task_blocker([task])
+    assert reason is not None and "dead" in reason and "context" in reason
+
+
+def test_dead_task_blocker_accepts_http_overflow_variant() -> None:
+    # Some gateways surface the 400 as a plain ModelHTTPError — the pair
+    # must still be recognized via the overflow markers (usage.py list).
+    task = task_with_events(_HTTP_OVERFLOW_ERROR_EVENT, _DEAD_TASK_MARKER_EVENT)
+    assert dead_task_blocker([task]) is not None
+
+
+def test_dead_task_blocker_requires_error_before_marker() -> None:
+    # Marker alone (e.g. reworded upstream text) is not enough — fail only
+    # on the «overflow error + subsequent manual-intervention» pair.
+    assert dead_task_blocker([task_with_events(_DEAD_TASK_MARKER_EVENT)]) is None
+
+
+def test_dead_task_blocker_ignores_transient_errors() -> None:
+    # 429s / network errors are retried by design — never terminal.
+    task = task_with_events(_TRANSIENT_ERROR_EVENT, _DEAD_TASK_MARKER_EVENT)
+    assert dead_task_blocker([task]) is None
+
+
+def test_dead_task_blocker_ignores_benign_tasks() -> None:
+    ok = completed(VerificationStatus.PASSED)
+    assert dead_task_blocker([ok]) is None
+
+
+async def test_wait_settle_dead_task_is_immediate_hard_failure() -> None:
+    """A dead task keeps the queue non-empty (soft blocker) forever —
+    settle must fail the run immediately instead of burning the timeout
+    (S4/incredible-four: 3 × 45 min on runs decided in ~2 minutes)."""
+    dead = task_with_events(_OVERFLOW_ERROR_EVENT, _DEAD_TASK_MARKER_EVENT)
+    target = completed(VerificationStatus.PASSED)
+    app = make_app(target, dead)
+    result = await wait_settle(
+        app,
+        make_scenario(verification="passed"),
+        FakePilot(),
+        timeout=30.0,
+        targets=[target],
+        poll_seconds=0.01,
+    )
+    assert not result.ok and not result.timed_out
+    assert "dead" in result.reason and "manual intervention" in result.reason
+    assert result.elapsed_s < 5.0  # did not wait for the 30 s timeout
+
+
+async def test_wait_settle_settled_ok_beats_dead_task_marker() -> None:
+    # Defensive ordering: the hard blocker is evaluated only when the soft
+    # criterion does not hold — a task that somehow settled with the pair
+    # in its history must not flip a green run.
+    task = task_with_events(_OVERFLOW_ERROR_EVENT, _DEAD_TASK_MARKER_EVENT)
+    task.status = TaskStatus.COMPLETED
+    task.verification = VerificationStatus.PASSED
+    app = make_app(task)
+    result = await wait_settle(
+        app,
+        make_scenario(verification="passed"),
+        FakePilot(),
+        timeout=1.0,
+        targets=[task],
+        poll_seconds=0.01,
+    )
+    assert result.ok and not result.timed_out
 
 
 # -- dump_diagnostics -------------------------------------------------------------
