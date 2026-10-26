@@ -4,7 +4,7 @@
 class JournalEntry:
     """One double-entry record: debit and credit in minor units."""
 
-    __slots__ = ("account", "debit", "credit")
+    __slots__ = ("account", "credit", "debit")
 
     def __init__(self, account: str, debit: int, credit: int) -> None:
         self.account = account

@@ -1,5 +1,4 @@
 import pytest
-
 from dispatch.pricing import batches_needed, volume_tier
 
 
