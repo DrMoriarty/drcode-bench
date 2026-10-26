@@ -88,7 +88,7 @@ max_context_tokens = 100000
 max_tokens = 8192
 
 # Same for the S4 tester: the catalog entry stays big; the scenario's
-# [context] cap (6000) is what both tester gates must divide by.
+# [context] cap (30000) is what both tester gates must divide by.
 [providers.fake.models.s4-tester]
 max_context_tokens = 1000000
 max_tokens = 8192
@@ -157,7 +157,7 @@ research   = "fake/{research}"
 # Per-role max_context_tokens overrides appended to the generated combo —
 # DEPRECATED source (§1.2): the working path is the scenario's [context]
 # section. S4 keeps a COMBO override (50000) on purpose: the scenario's
-# [context] tester = 6000 must WIN over it, so the e2e proves the
+# [context] tester = 30000 must WIN over it, so the e2e proves the
 # scenario → combo priority on the real pipeline (a regression to
 # combo-wins would resolve tester to 50000 and fail the assertions
 # below).
@@ -172,7 +172,7 @@ COMBOS = {
     # S3/S4: the compaction lives on the CODER side (S3) / the TESTER side
     # (S4); the inflated gateway usage (fake_gateway._usage_for) trips the
     # real gates of drcode (both on the scenario's [context] caps — 5000
-    # for the S3 coding role, 6000 for the S4 tester role).
+    # for the S3 coding role, 30000 for the S4 tester role).
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
     "s7_fault_injection": ("s7-coder", "s7-tester"),
@@ -433,13 +433,13 @@ async def test_s4_compaction_tester_end_to_end(tmp_path: Path, monkeypatch, env_
     assert brief["n_testing_rounds"] == 1
 
     # §1.2: the small limit landed on the tester ROLE via the scenario's
-    # [context] cap — 6000, beating BOTH the combo's 50000 override and
+    # [context] cap — 30000, beating BOTH the combo's 50000 override and
     # the s4-tester catalog entry (1000000) — while coding keeps its
     # untouched catalog limit — the two roles must resolve DIFFERENT
     # contexts now that the resume path reads the tester config too
     # (upstream 5129872).
     assert report.resolved_context_tokens["coding"] == 100000
-    assert report.resolved_context_tokens["tester"] == 6000
+    assert report.resolved_context_tokens["tester"] == 30000
     assert report.resolved_context_sources["tester"] == "scenario"
     assert report.resolved_context_sources["coding"] == "catalog"
 

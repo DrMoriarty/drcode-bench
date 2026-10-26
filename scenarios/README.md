@@ -37,7 +37,7 @@ pytest в workspace**, вердикт не строится на словах а
   `verification = "passed"` требует, чтобы целевые задачи завершились
   с меткой PASSED тестировщика (`"any"` — метка не проверяется).
 - `[context]` (опция, план §1.2) — пер-ролевые капы `max_context_tokens`
-  ЭТОГО сценария: у S3 `coding = 5000`, у S4 `tester = 6000`,
+  ЭТОГО сценария: у S3 `coding = 5000`, у S4 `tester = 30000`,
   `compaction = 4096`, `research = ...`. «Как вызвать компакцию» — знание
   сценария (прецедент
   — `[proxy]` у S7), а не матрицы: кап попадает в entry каталога
@@ -147,7 +147,7 @@ S11 (research V3), S12 (research V4), S13 (research V5, compound)**.
   пер-ролевое разрешение моделей): S3 — кодинговой модели (её mid-run/
   turn-boundary гейты), S4 — модели тестера (её mid-round гейт). Кап —
   часть сценария: секция `[context]` в scenario.toml
-  (S3: `coding = 5000`, S4: `tester = 6000`), попадает в entry каталога
+  (S3: `coding = 5000`, S4: `tester = 30000`), попадает в entry каталога
   models.json, который перекрывает flat config для роли (env
   `DRCODE_MAX_CONTEXT_TOKENS` не используется — flat-config fallback в
   0.5.0 удалён — и в прогоне всё равно вычищается). Сценарный кап

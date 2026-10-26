@@ -1059,21 +1059,21 @@ USAGE = {"prompt_tokens": 120, "completion_tokens": 24, "total_tokens": 144}
 # S3/S4: the gateway INFLATES the reported usage of these models so the
 # compaction gates of drcode really trip in the e2e runs (plan §1.2). The
 # caps come from the scenario's `[context]` section (5000 for the S3
-# coding role, 6000 for the S4 tester role), so the inflation is tuned
+# coding role, 30000 for the S4 tester role), so the inflation is tuned
 # to THAT window (threshold = 80% of the cap, hard limit = 97%):
 # - s3-coder: usage(n) = 300 + 1100·n crosses 80% × 5000 = 4000 at
 #   n = 4 (4724) — the mid-run/turn-boundary gate trips there — and
 #   stays under the hard limit 4850;
-# - s4-tester: usage(n) = 300 + 1600·n crosses 80% × 6000 = 4800 at
-#   n = 3 (5124, right after the third `cat`) — the mid-round gate
-#   trips there — and stays under the hard limit 5820.
+# - s4-tester: usage(n) = 300 + 8000·n crosses 80% × 30000 = 24000 at
+#   n = 3 (24300, right after the third `cat`) — the mid-round gate
+#   trips there — and stays under the hard limit 29100.
 # In both cases the post-compaction continuation turn carries NO tool
 # results (the history is a summary), so it reports the bare base —
 # back under the threshold, and the compacted run settles instead of
 # looping pause→compact forever. The read_file budget guard reads the
 # same numbers, so at the trip point a further read is refused (a neutral
 # tool result — the gate handles the window).
-INFLATED_USAGE = {"s3-coder": (300, 1100), "s4-tester": (300, 1600)}
+INFLATED_USAGE = {"s3-coder": (300, 1100), "s4-tester": (300, 8000)}
 
 
 def _usage_for(model: str, messages: list[dict]) -> dict:
