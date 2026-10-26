@@ -7,7 +7,7 @@ The verdict is NEVER built on the agents' words:
   1. pytest is run in the workspace by the harness itself;
   2. the persisted task JSON must show that the compaction really
      happened on the small coding context (§1.2: max_context_tokens of
-     the CODING model ≈ 3000 from the combo's catalog override):
+     the CODING model ≈ 5000 from the scenario's [context] section):
        - a "Context compacted" event in `events`;
        - a compaction start event (mid-run pause or turn-boundary gate);
        - a synthetic user prompt with COMPACTION_SUMMARY_PREFIX in
