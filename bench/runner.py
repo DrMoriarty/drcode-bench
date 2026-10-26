@@ -73,6 +73,21 @@ class RunnerError(RuntimeError):
     """The sweep cannot even be planned (broken matrix or scenario)."""
 
 
+def format_duration(seconds: float) -> str:
+    """Human-readable duration: days, hours, minutes, seconds — leading
+    zero components are omitted (`45 s`, `1 m 30 s`, `2 h 5 s`,
+    `1 d 0 h 0 m 1 s` keeps interior zeros; `< 1 s` → `0 s`)."""
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    for value, unit in ((days, "d"), (hours, "h"), (minutes, "m"), (secs, "s")):
+        if value or parts:
+            parts.append(f"{value} {unit}")
+    return " ".join(parts) if parts else "0 s"
+
+
 def warn_missing_api_keys(matrix_path: Path) -> None:
     """§8: `api_key = "env:NAME"` is substituted from the HOST environment
     when the catalog is generated; a variable missing at planning time
@@ -388,7 +403,7 @@ class Runner:
                     f"[done] {job.scenario} × {job.combo} × rep{job.repeat}: {status}"
                     + (f" — {outcome.reason}" if outcome.reason and not outcome.ok else "")
                 )
-        self._log(f"[sweep] {len(jobs)} job(s) in {time.monotonic() - started:.0f} s")
+        self._log(f"[sweep] {len(jobs)} job(s) in {format_duration(time.monotonic() - started)}")
         self.write_summary(outcomes)
         return outcomes
 
