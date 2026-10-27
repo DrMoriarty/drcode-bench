@@ -1078,6 +1078,10 @@ def _md_to_html(md: str) -> str:
         "tr.verdict-ok{background:#d9ead3;}",
         "tr.verdict-fail{background:#f4cccc;}",
         "tr.verdict-mixed{background:#fff2cc;}",
+        # Summary-table scenario clusters: a bold top border separates the
+        # rows of one scenario from the rows of the next one (rows are
+        # already emitted grouped by scenario, ascending).
+        "tr.scenario-start td{border-top:3px solid #666;}",
         "h1,h2,h3{margin-top:1.6rem;}",
         "</style></head><body>",
     ]
@@ -1116,6 +1120,7 @@ def _md_to_html(md: str) -> str:
             glossary_cols = {
                 c for c, cell in enumerate(rows[0]) if cell.lower() in ("gate", "stability")
             }
+            prev_scenario: str | None = None
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 if r == 0:
@@ -1125,11 +1130,19 @@ def _md_to_html(md: str) -> str:
                         if cell.lower() in ("verdict", "verdicts"):
                             verdict_col = c
                             break
-                cls = ""
+                classes: list[str] = []
                 if r > 0 and verdict_col is not None and verdict_col < len(row):
                     row_cls = _verdict_row_class(row[verdict_col])
                     if row_cls:
-                        cls = f' class="{row_cls}"'
+                        classes.append(row_cls)
+                # Scenario-cluster hook: in the summary table the first
+                # row of each new scenario gets a bold top border, so the
+                # rows of one scenario read as a visual cluster.
+                if is_summary and r > 0:
+                    if prev_scenario is not None and row[0] != prev_scenario:
+                        classes.append("scenario-start")
+                    prev_scenario = row[0]
+                cls = f' class="{" ".join(classes)}"' if classes else ""
                 body = "".join(
                     f"<{tag}>{_render_cell(cell, summary=is_summary and r > 0, glossary=r > 0 and ci in glossary_cols)}</{tag}>"
                     for ci, cell in enumerate(row)

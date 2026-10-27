@@ -533,6 +533,31 @@ def test_html_glossary_tooltips(tmp_path: Path) -> None:
     assert "<td>◉ c1</td>" in text
 
 
+def test_html_summary_scenario_clusters(tmp_path: Path) -> None:
+    """Summary-table rows group into scenario clusters: the first row of
+    each new scenario carries the `scenario-start` class (bold top
+    border), coexisting with the verdict colouring; the very first data
+    row does not (nothing above it to separate from), rows inside a
+    cluster don't, and the per-run table is not clustered."""
+    _write_run(tmp_path, make_metrics("r-s1-c1", "s1", "c1"))
+    _write_run(tmp_path, make_metrics("r-s1-c2", "s1", "c2"))
+    fail = make_metrics("r-s2-c1", "s2", "c1")
+    fail["verdict"] = "failed"
+    _write_run(tmp_path, fail)
+    _write_run(tmp_path, make_metrics("r-s2-c2", "s2", "c2"))
+    text = generate_report(tmp_path, html=True).with_suffix(".html").read_text(encoding="utf-8")
+    rows = [ln for ln in text.splitlines() if ln.startswith("<tr")]
+    summary_rows = rows[1:5]
+    assert summary_rows[0].startswith('<tr class="verdict-ok">')  # s1/c1: top of the table
+    assert summary_rows[1].startswith('<tr class="verdict-ok">')  # s1/c2: same cluster
+    assert summary_rows[2].startswith(
+        '<tr class="verdict-fail scenario-start">'
+    )  # s2/c1: new cluster
+    assert summary_rows[3].startswith('<tr class="verdict-ok">')  # s2/c2: same cluster
+    # The runs table (one row per run) has no scenario clustering.
+    assert not any("scenario-start" in ln for ln in rows[5:])
+
+
 def test_html_indented_block_line_terminates_paragraph() -> None:
     """A non-blank line indented before `#`/`- `/`|` misses the unstripped
     outer dispatch but the stripped paragraph exclusion — the fallback
