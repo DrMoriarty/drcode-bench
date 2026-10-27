@@ -20,12 +20,19 @@
 # write_file / edit_file / run_bash may only touch documentation
 # (*.md, AGENTS.md, docs/) — docs/report.md fits. The brief tells the
 # agent to create the file with write_file so it lands in
-# task.edited_files and the mandatory git_commit_docs commits it —
-# the stricter "git log -- docs/report.md non-empty" check of
-# checks.py relies on that. The docs artifact is also named in the
-# brief TITLE (same template as s10/s11): a computation-only title
-# reads as question-answering and models skip git_commit_docs
-# (observed in the 20261026 sweep: 3/9 commits before the fix).
+# task.edited_files and the mandatory git_commit_docs CAN commit it.
+# The commit itself is a MEASURED discipline, not a verdict gate:
+# the agent prompt still mandates git_commit_docs (drcode research.md /
+# research_git_push.md), but checks.py no longer fails a run whose
+# report was not committed — it emits `S9 metric: report_committed=`
+# instead, which the harness carries into result.json → metrics.json →
+# the report's `report_committed` column (sweeps 20261026/20261027:
+# otherwise half the matrix dies on the lone "git log is empty" check
+# while the report content itself is correct). The docs artifact is
+# also named in the brief TITLE (same template as s10/s11): a
+# computation-only title reads as question-answering and models skip
+# git_commit_docs (observed in the 20261026 sweep: 3/9 commits before
+# the fix).
 
 id = "s9_research_count"
 timeout = 30  # minutes — soft limit (§4: 30–60 min)

@@ -51,6 +51,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -75,6 +76,17 @@ SCENARIOS_ROOT = PROJECT_ROOT / "scenarios"
 
 APP_SIZE = (120, 40)  # plan §4: run_test size only affects the layout
 
+# Machine-readable metric lines a scenario's checks.py may emit on stdout
+# (`<scenario> metric: <key>=<value>`, e.g. s9's
+# `S9 metric: report_committed=true`): facts that must NOT gate the verdict
+# but still have to reach result.json → metrics.json → the report's matrix
+# columns. `true`/`false` parse into real booleans, other values stay
+# strings; a metric the check never printed stays absent.
+CHECKS_METRIC_RE = re.compile(
+    r"^(?P<scenario>[A-Za-z][A-Za-z0-9_]*) metric: "
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\S+)$"
+)
+
 
 class RunError(RuntimeError):
     """The run could not even start (infrastructure failure)."""
@@ -95,6 +107,11 @@ class RunReport:
     settle_elapsed_s: float = 0.0
     checks_ok: bool | None = None  # None = scenario has no checks.py
     checks_output: str = ""
+    # Non-verdict facts parsed from checks.py stdout (`S9 metric:
+    # report_committed=true`, §10): e.g. s9's commit discipline is
+    # MEASURED, not gated — the metrics extractor copies this dict into
+    # metrics.json and the report renders its `report_committed` column.
+    checks_metrics: dict[str, Any] = field(default_factory=dict)
     resolved_roles: dict[str, str] = field(default_factory=dict)
     # Effective max_context_tokens per role (scenario `[context]` caps and
     # combo overrides applied, §1.2): S3/S4 assert the small context
@@ -152,17 +169,38 @@ def _kick_pipeline(app) -> None:
     app.call_later(app._advance)
 
 
-def run_checks(scenario: Scenario, workspace: Path) -> tuple[bool | None, str]:
+def parse_checks_metrics(output: str) -> dict[str, Any]:
+    """checks.py stdout → its machine-readable metrics (`<scenario> metric:
+    <key>=<value>` lines; `true`/`false` become real booleans)."""
+    metrics: dict[str, Any] = {}
+    for line in output.splitlines():
+        m = CHECKS_METRIC_RE.match(line.strip())
+        if m is None:
+            continue
+        value: Any = m.group("value")
+        if value == "true":
+            value = True
+        elif value == "false":
+            value = False
+        metrics[m.group("key")] = value
+    return metrics
+
+
+def run_checks(scenario: Scenario, workspace: Path) -> tuple[bool | None, str, dict[str, Any]]:
     """Run the scenario's mechanical correctness check (§7): the verdict
     is never built on the agents' words. `checks.py <workspace>` exit 0 =
-    green. No checks.py → None (nothing to assert mechanically)."""
+    green. No checks.py → None (nothing to assert mechanically).
+
+    Non-verdict facts (measured discipline metrics, §10) come back as the
+    third element: `S9 metric: <key>=<value>` lines parsed out of the
+    check's stdout — a scenario without such lines yields an empty dict."""
     # Resolve both paths to absolute: the child runs with cwd=workspace, so a
     # relative workspace argument would be re-resolved against the workspace
     # itself and fail with FileNotFoundError.
     checks = scenario.checks_file.resolve()
     workspace = workspace.resolve()
     if not checks.is_file():
-        return None, ""
+        return None, "", {}
     result = subprocess.run(
         [sys.executable, str(checks), str(workspace)],
         capture_output=True,
@@ -171,7 +209,7 @@ def run_checks(scenario: Scenario, workspace: Path) -> tuple[bool | None, str]:
         check=False,
     )
     output = (result.stdout + result.stderr).strip()
-    return result.returncode == 0, output
+    return result.returncode == 0, output, parse_checks_metrics(output)
 
 
 def _task_summaries(manager) -> list[dict[str, object]]:
@@ -409,7 +447,9 @@ async def _run_with_optional_proxy(
         report.reason = f"app crashed: {type(e).__name__}: {e}"
 
     report.tasks = _task_summaries(app.manager)
-    report.checks_ok, report.checks_output = run_checks(scenario, paths.workspace)
+    report.checks_ok, report.checks_output, report.checks_metrics = run_checks(
+        scenario, paths.workspace
+    )
 
     if settled_ok and report.checks_ok is False:
         report.reason = f"settled but checks.py failed:\n{report.checks_output}"
@@ -503,6 +543,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if report.checks_ok is not None:
         print(f"checks.py: {'green' if report.checks_ok else 'RED'}")
+    if report.checks_metrics:
+        rendered = ", ".join(
+            f"{k}={str(v).lower() if isinstance(v, bool) else v}"
+            for k, v in report.checks_metrics.items()
+        )
+        print(f"checks metrics: {rendered}")
     if report.user_sim_actions or report.user_sim_failures:
         print(f"user sim: {report.user_sim_actions} intervention(s) ({run_dir / 'user_sim.jsonl'})")
         for failure in report.user_sim_failures:

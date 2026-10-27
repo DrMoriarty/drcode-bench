@@ -46,7 +46,8 @@ Served models (scripted per model id, see SCRIPTS):
   legitimate tool use, the brief leaves the path free), writes
   docs/report.md with write_file ("total: <number>" — the pinned format
   checks.py parses) and commits it via git_commit_docs (the research.md
-  mandate for documentation assignments).
+  mandate for documentation assignments — s9 MEASURES that discipline as
+  the `S9 metric: report_committed=` line instead of gating on it).
 - ``s10-research`` — the S10 scripted research agent (variant V2):
   enumerates the seed with glob_files, then ONE grep_search over the
   alternation of the three planted-fact identifiers (orphan constant,
@@ -664,7 +665,7 @@ def _s8_tester_script(messages: list[dict]) -> dict:
     return _bash_end_run("Тесты зелёные, задача verified.")
 
 
-# -- S9: research task over the CSV seed (docs/report.md + git_commit_docs) -------
+# -- S9: research task over the CSV seed (docs/report.md, commit measured) --------
 
 # The metric computation is a legitimate tool use (the brief leaves the
 # path free): one python one-liner over data/orders.csv prints the sum of
@@ -682,9 +683,10 @@ def _s9_research_script(messages: list[dict]) -> dict:
     """Research agent for S9: compute the metric with run_bash, write
     docs/report.md with write_file (tracked into task.edited_files), commit
     it with git_commit_docs (the research.md mandate for documentation
-    assignments), end the turn. Stateless decisions from the history: the
-    computed number is parsed from the LAST run_bash output ('exit=0' line
-    first, the printed sum last)."""
+    assignments — s9 measures the discipline via report_committed instead
+    of failing the run on a missing commit), end the turn. Stateless
+    decisions from the history: the computed number is parsed from the
+    LAST run_bash output ('exit=0' line first, the printed sum last)."""
     if _called(messages, "git_commit_docs"):
         return _bash_end_run("Готово: отчёт записан в docs/report.md и закоммичен.")
     if _called(messages, "write_file"):

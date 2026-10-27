@@ -620,9 +620,12 @@ async def test_s8_fix_loop_end_to_end(tmp_path: Path, monkeypatch, env_guard) ->
 async def test_s9_research_count_end_to_end(tmp_path: Path, monkeypatch, env_guard) -> None:
     """S9 (variant V1 research): a kind=research brief — the agent computes
     a metric from the seed CSV (the path is free; the scripted agent uses
-    run_bash + python, a legitimate tool use), writes docs/report.md in the
-    pinned format (one line exactly "total: <number>", parsed by the
-    anchored regex in checks.py) and commits it via git_commit_docs.
+    run_bash + python, a legitimate tool use) and writes docs/report.md in
+    the pinned format (one line exactly "total: <number>", parsed by the
+    anchored regex in checks.py). The commit discipline (git_commit_docs)
+    is MEASURED, not gated: checks.py emits
+    `S9 metric: report_committed=...` — the scripted agent does commit, so
+    the metric must read true and propagate to result.json / metrics.json.
     Research skips the tester entirely (plan §7): no verification label,
     zero testing rounds, zero user interventions; checks.py recomputes the
     reference from the seed CSV itself, so nothing is hardcoded twice."""
@@ -632,6 +635,13 @@ async def test_s9_research_count_end_to_end(tmp_path: Path, monkeypatch, env_gua
     assert report.ok, report.reason
     assert not report.timed_out
     assert report.checks_ok is True
+    # The measured commit discipline reached the artifacts (§10): parsed
+    # from checks.py stdout into result.json, copied into metrics.json.
+    assert report.checks_metrics == {"report_committed": True}
+    result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert result["checks_metrics"] == {"report_committed": True}
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["result"]["checks_metrics"] == {"report_committed": True}
     (brief,) = report.tasks
     assert brief["kind"] == "research"
     assert brief["status"] == "completed"
@@ -648,7 +658,8 @@ async def test_s9_research_count_end_to_end(tmp_path: Path, monkeypatch, env_gua
     assert not any("fake-coder@" in str(r.get("role")) for r in log_records)
 
     # The report is on disk in the pinned format and in the git history
-    # (git_commit_docs committed the agent's own write_file edit).
+    # (the scripted agent followed the git_commit_docs mandate — the same
+    # discipline checks.py measures as report_committed=true above).
     report_md = (run_dir / "workspace" / "docs" / "report.md").read_text(encoding="utf-8")
     match = re.search(r"^total: (\d+)$", report_md, re.MULTILINE)
     assert match, report_md

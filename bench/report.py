@@ -558,6 +558,14 @@ def aggregate_pairs(
         rounds = _agg([(m.get("totals") or {}).get("n_testing_rounds") for m in group])
         round_trips = _agg([len(m.get("bug_round_trips") or []) for m in group])
         sim_interventions = _agg([(m.get("user_sim") or {}).get("interventions") for m in group])
+        # Measured commit discipline (s9, §10): the `report_committed`
+        # metric parsed from checks.py stdout — NOT a verdict gate, shown
+        # as its own column so a missing commit stays visible in the
+        # matrix without failing the run.
+        report_committed = [
+            ((m.get("result") or {}).get("checks_metrics") or {}).get("report_committed")
+            for m in group
+        ]
         tokens = _agg(
             [((m.get("totals") or {}).get("usage") or {}).get("output_tokens") for m in group]
         )
@@ -580,6 +588,7 @@ def aggregate_pairs(
                 "testing_rounds": rounds,
                 "bug_round_trips": round_trips,
                 "sim_interventions": sim_interventions,
+                "report_committed": report_committed,
                 "output_tokens": tokens,
                 "model_requests": requests,
                 "tokens_by_role": _tokens_by_role(group),
@@ -599,6 +608,24 @@ def _representative_run(group: list[dict[str, Any]], wall: dict[str, Any]) -> st
         if median is not None and m.get("wall_time_s", {}).get("settle") == median:
             return m.get("run_id")
     return group[0].get("run_id") if group else None
+
+
+def _commit_cell(values: list[Any]) -> str:
+    """The summary-table `report_committed` cell (s9, §10): the measured
+    commit discipline over the pair's repeats. `yes` / `no` when every
+    run with a measurement agrees, `mixed` when the repeats disagree,
+    `—` when no run of the pair measured the metric at all (scenarios
+    without the metric render `—` too). The metric is NOT a verdict
+    gate: a `no` pair is still a green run whose report simply was not
+    committed by git_commit_docs."""
+    known = {v for v in values if v is not None}
+    if not known:
+        return "—"
+    if known == {True}:
+        return "yes"
+    if known == {False}:
+        return "no"
+    return "mixed"
 
 
 def _run_count_cell(p: dict[str, Any]) -> str:
@@ -649,8 +676,9 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
         "score (α·t+β$) | wall-time (median, s) | "
         "compactions (med) | testing rounds (med) | bug round-trips (med) | "
         "sim interventions (med) | output tokens (med) | "
-        "model requests (med) | tokens by role (med, prompt/compl.) | gate | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "model requests (med) | tokens by role (med, prompt/compl.) | "
+        "report_committed | gate | stability |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
         tokens_by_role = "; ".join(
@@ -672,6 +700,7 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             f"| {_with_spread(p['output_tokens'], _thousands)} "
             f"| {_fmt(p['model_requests']['median'])} "
             f"| {tokens_by_role or '—'} "
+            f"| {_commit_cell(p['report_committed'])} "
             f"| {', '.join(p['gate'])} "
             f"| {', '.join(p['stability'])} |"
         )
@@ -717,9 +746,9 @@ def _winner_rows(pairs: list[dict[str, Any]]) -> list[str]:
 
 def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| run | scenario | combo | verdict | wall-time | checks | compactions "
+        "| run | scenario | combo | verdict | wall-time | checks | report_committed | compactions "
         "(ok/started/failed) | testing rounds | sim interventions | tasks | gate | stability | artifacts |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in runs:
         run_id = m.get("run_id") or "?"
@@ -728,6 +757,8 @@ def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
         checks_str = {True: "green", False: "RED", None: "n/a"}.get(
             checks if checks is None else bool(checks), "n/a"
         )
+        committed = ((m.get("result") or {}).get("checks_metrics") or {}).get("report_committed")
+        committed_str = "yes" if committed is True else "no" if committed is False else "—"
         comp = m.get("totals", {})
         comp_str = (
             f"{_fmt(comp.get('n_compactions'))}/{_fmt(comp.get('n_compactions_started'))}"
@@ -748,7 +779,7 @@ def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
         lines.append(
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
             f"| {_fmt(m.get('verdict'))} | {_sec_1dec(m.get('wall_time_s', {}).get('settle'))} "
-            f"| {checks_str} | {comp_str} "
+            f"| {checks_str} | {committed_str} | {comp_str} "
             f"| {_fmt(comp.get('n_testing_rounds'))} | {sim_str} | {verdicts} "
             f"| {gate} "
             f"| {_stability_flags(m)} "
@@ -925,7 +956,9 @@ def generate_report(
         "## Summary (scenario × combo)",
         "",
         "Medians over the repeats of each pair; a single run is a repeat count of 1. "
-        "The run count links to the artifacts of the pair's median-wall run.",
+        "The run count links to the artifacts of the pair's median-wall run. "
+        "`report_committed` (s9) — the measured git_commit_docs discipline: "
+        "a metric, not a verdict gate (a `no` pair can still be green).",
         "",
         *_pair_rows(pairs),
         "",

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from bench.matrix import load_matrix
-from bench.run_one import run_benchmark
+from bench.run_one import parse_checks_metrics, run_benchmark
 from bench.scenario import load_scenario_by_id
 
 REPO = Path(__file__).resolve().parents[1]
@@ -193,3 +193,26 @@ async def test_run_one_happy_path_settles_green(tmp_path: Path, env_guard, monke
     # The coder saw the brief exactly once, as one prompt (§7 S1: the
     # brief reaches the model verbatim).
     assert "Сделайте тест зелёным" in state["calls"][0] or "pytest" in state["calls"][0]
+
+
+def test_parse_checks_metrics() -> None:
+    """The `<scenario> metric: key=value` stdout channel of checks.py
+    (§10): booleans parse into real bools, other values stay strings,
+    non-metric lines are ignored, the scenario id is free-form."""
+    output = "\n".join(
+        [
+            "S9 checks: green (report carries total: 4250)",
+            "S9 metric: report_committed=true",
+            "s10 metric: findings_validated=false",
+            "s11 metric: route_count=5",
+            "some other output line",
+            "S9 metric: broken line without equals sign",
+        ]
+    )
+    assert parse_checks_metrics(output) == {
+        "report_committed": True,
+        "findings_validated": False,
+        "route_count": "5",
+    }
+    # No metric lines → empty dict (scenarios without the channel).
+    assert parse_checks_metrics("S9 checks FAILED:\n- docs/report.md is missing") == {}

@@ -18,14 +18,20 @@ The verdict is NEVER built on the agents' words:
      testing rounds (research skips the tester, plan §7) and no
      verification label (research ends with mark_done — there is
      nothing to verify);
-  4. the stricter git check: `git log -- docs/report.md` is non-empty,
-     i.e. the research agent's mandatory git_commit_docs really
-     committed the report (the workspace is a git repo with a seed
-     commit, bench/env_setup.py; the brief told the agent to create
-     the file with write_file so it lands in task.edited_files and is
-     committable). If git itself is unavailable the check is skipped
-     — a report committed by no means is caught by (3)'s event trail
-     in the diagnostics instead.
+The verdict is built on checks 1-3 ONLY. The commit discipline of the
+research agent (the mandatory git_commit_docs of the drcode research.md
+prompt really committed the report) is NOT a verdict condition anymore
+— it is a MEASURED metric: this script emits a machine-readable line
+
+    S9 metric: report_committed=true|false
+
+which bench/run_one.py parses out of stdout into result.json
+(`checks_metrics`) and the report aggregates into a dedicated
+`report_committed` column (§10). The workspace is a git repo with a
+seed commit (bench/env_setup.py) and the brief tells the agent to
+create the file with write_file so it lands in task.edited_files and
+is committable; when git itself is unavailable the metric line is
+omitted entirely (the harness reads None — "unknown", not "false").
 """
 
 from __future__ import annotations
@@ -107,7 +113,10 @@ def main() -> int:
                 "(research ends with mark_done and never gets a verdict label)"
             )
 
-    # 4. The stricter git check: git_commit_docs committed the report.
+    # 4. NOT a verdict condition: the commit discipline is measured and
+    #    emitted as a machine-readable metric line (see the docstring).
+    #    bench/run_one.py parses `S9 metric: key=value` out of stdout —
+    #    for any other scenario that means zero changes here.
     if report.is_file():
         git_run = subprocess.run(
             ["git", "log", "--", "docs/report.md"],
@@ -117,13 +126,12 @@ def main() -> int:
             check=False,
         )
         if git_run.returncode != 0:
+            # git itself is unavailable: no metric line at all — the
+            # harness reads None ("unknown"), never a false positive.
             print(f"S9 checks: git log skipped ({git_run.stderr.strip()})")
-        elif not git_run.stdout.strip():
-            failures.append(
-                "git log -- docs/report.md is empty — the report was not "
-                "committed by git_commit_docs (the documentation assignment "
-                "must end with the agent committing its own changes)"
-            )
+        else:
+            committed = bool(git_run.stdout.strip())
+            print(f"S9 metric: report_committed={'true' if committed else 'false'}")
 
     if failures:
         print("S9 checks FAILED:")
@@ -133,7 +141,7 @@ def main() -> int:
     print(
         "S9 checks: green (docs/report.md carries total: "
         f"{reference} — recomputed from data/orders.csv, research task "
-        "COMPLETED with 0 testing rounds, report committed)"
+        "COMPLETED with 0 testing rounds)"
     )
     return 0
 

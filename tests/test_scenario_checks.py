@@ -7,6 +7,7 @@ variants, so the assertions are known to actually bite.
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import subprocess
@@ -924,3 +925,122 @@ def test_s6_checks_bite_on_red_pytest(tmp_path: Path) -> None:
         write_task(workspace, **task)
     result = run_checks("s6_queue_priority", workspace)
     assert result.returncode == 1
+
+
+# -- S9: research count + measured commit discipline ----------------------------
+
+
+def s9_git_init_workspace(workspace: Path) -> None:
+    """The git state a real run tree has (bench/env_setup.py): git init +
+    a SEED commit — the report is written later by the agent, so right
+    after the seed `git log -- docs/report.md` is empty."""
+    subprocess.run(["git", "init", "--initial-branch=main", "."], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "bench@drcode.local"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "drcode-bench"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=workspace, check=True)
+    (workspace / ".gitignore").write_text(".drcode/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=workspace, check=True)
+
+
+def s9_report_content() -> str:
+    """The pinned-format report, with the total RECOMPUTED from the seed
+    CSV (the same single-source-of-truth contract checks.py enforces)."""
+    seed_csv = REPO / "scenarios" / "s9_research_count" / "seed" / "data" / "orders.csv"
+    with seed_csv.open(encoding="utf-8", newline="") as f:
+        total = sum(int(row["amount"]) for row in csv.DictReader(f) if row["status"] == "completed")
+    return f"total: {total}\n"
+
+
+def s9_research_task(workspace: Path) -> None:
+    scenario = load_scenario_toml("s9_research_count")
+    write_task(
+        workspace,
+        title=scenario["briefs"][0]["title"],
+        kind="research",
+        verification=None,
+        tester_messages=[],
+    )
+
+
+def test_s9_checks_green_uncommitted(tmp_path: Path) -> None:
+    """The content/research-contract checks are green; the report was NOT
+    committed — that is a METRIC (report_committed=false), not a failure:
+    the run stays exit 0 (sweep 2026-10-27: deepseek/glm finished without
+    the final git_commit_docs and must not die on the lone git check)."""
+    run_dir = make_workspace(tmp_path, "s9_research_count", fix=False)
+    workspace = run_dir / "workspace"
+    s9_git_init_workspace(workspace)
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "report.md").write_text(s9_report_content(), encoding="utf-8")
+    s9_research_task(workspace)
+    result = run_checks("s9_research_count", workspace)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "S9 metric: report_committed=false" in result.stdout
+
+
+def test_s9_checks_green_committed(tmp_path: Path) -> None:
+    """The happy path of the discipline: git_commit_docs committed the
+    report → exit 0 AND report_committed=true."""
+    run_dir = make_workspace(tmp_path, "s9_research_count", fix=False)
+    workspace = run_dir / "workspace"
+    s9_git_init_workspace(workspace)
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "report.md").write_text(s9_report_content(), encoding="utf-8")
+    s9_research_task(workspace)
+    subprocess.run(["git", "add", "docs/report.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-m", "Add revenue report"], cwd=workspace, check=True)
+    result = run_checks("s9_research_count", workspace)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "S9 metric: report_committed=true" in result.stdout
+
+
+def test_s9_checks_bite_on_wrong_total(tmp_path: Path) -> None:
+    """A wrong number still fails the verdict — the metric change only
+    un-gates the commit discipline, never the content checks."""
+    run_dir = make_workspace(tmp_path, "s9_research_count", fix=False)
+    workspace = run_dir / "workspace"
+    s9_git_init_workspace(workspace)
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "report.md").write_text("total: 999999\n", encoding="utf-8")
+    s9_research_task(workspace)
+    result = run_checks("s9_research_count", workspace)
+    assert result.returncode == 1
+    assert "expected" in result.stdout
+    assert "git log" not in result.stdout  # the old commit failure is gone
+
+
+def test_s9_checks_bite_on_research_contract(tmp_path: Path) -> None:
+    """A verification label on a research task breaks the contract (§7:
+    research ends with mark_done) — the verdict must catch it."""
+    run_dir = make_workspace(tmp_path, "s9_research_count", fix=False)
+    workspace = run_dir / "workspace"
+    s9_git_init_workspace(workspace)
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "report.md").write_text(s9_report_content(), encoding="utf-8")
+    scenario = load_scenario_toml("s9_research_count")
+    write_task(
+        workspace,
+        title=scenario["briefs"][0]["title"],
+        kind="research",
+        verification="Verified successfully",
+        tester_messages=[[]],
+    )
+    result = run_checks("s9_research_count", workspace)
+    assert result.returncode == 1
+    assert "verification" in result.stdout
+
+
+def test_s9_checks_git_unavailable_no_metric_line(tmp_path: Path) -> None:
+    """Without a git repo the metric line is omitted entirely (the harness
+    reads "unknown", never a false `false`) and the content verdict stands
+    on its own."""
+    run_dir = make_workspace(tmp_path, "s9_research_count", fix=False)
+    workspace = run_dir / "workspace"
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "report.md").write_text(s9_report_content(), encoding="utf-8")
+    s9_research_task(workspace)
+    result = run_checks("s9_research_count", workspace)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "S9 metric:" not in result.stdout
+    assert "git log skipped" in result.stdout

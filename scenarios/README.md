@@ -248,15 +248,23 @@ status="completed") в `docs/report.md` строкой ровно вида
   тул-юз); угадать число нельзя — оно читается из данных.
 - Бриф требует создавать отчёт инструментом write_file: правка
   попадает в `task.edited_files`, и обязательный для документных
-  заданий `git_commit_docs` её коммитит.
+  заданий `git_commit_docs` может её закоммитить. Сам коммит —
+  ИЗМЕРЯЕМАЯ дисциплина, а не условие вердикта: требование в промпте
+  агента не меняется (drcode research.md), но его несоблюдение не
+  роняет сценарий (sweep 2026-10-27: модели доходят до write_file и
+  завершаются без финального коммита — 2/2 у deepseek).
 
 Assertions checks.py (verdict механический): эталон пересчитывается
 прямо из сидового CSV (сумма по фильтру) — сид и проверка не разъедутся;
 `docs/report.md` существует и содержит ровно одну строку под anchored
 regex `^total: (\d+)$`, число совпадает с эталоном; task JSON — ровно
 одна задача kind=research, status=completed, ноль testing-раундов,
-verification=None; строже — `git log -- docs/report.md` непуст
-(git_commit_docs использован; git недоступен → проверка пропускается).
+verification=None. Коммит-дисциплина в verdict НЕ входит: вместо
+падения checks.py печатает машиночитаемую строку
+`S9 metric: report_committed=true|false` — харнесс парсит её в
+`result.json.checks_metrics`, агрегирует в `metrics.json` и колонку
+`report_committed` отчёта (`git log -- docs/report.md` непуст — коммит
+был; git недоступен → строка не печатается, харнесс читает unknown).
 
 ## S10 — research-факты, посаженные в коде (research V2)
 

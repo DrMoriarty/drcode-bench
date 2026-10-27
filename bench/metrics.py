@@ -20,7 +20,9 @@ What is extracted per run (into `runs/<run_id>/metrics.json`):
   place), so it is estimated from the token usage of the last response
   before the summary vs the first response after it;
 - correctness: `verification` + the harness verdict (checks.py result
-  from `result.json`);
+  from `result.json`), plus the non-verdict `checks_metrics` facts
+  parsed from checks.py stdout (`S9 metric: report_committed=...` —
+  measured commit discipline, s9);
 - model traffic from the recorder (`model_log.jsonl`, §5): requests per
   role, per-request latency (p50/p95 per role and overall), tokens per
   role (prompt/completion) — and the cross-check of the recorder's
@@ -1597,6 +1599,11 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             "reason": result.get("reason", ""),
             "timed_out": result.get("timed_out"),
             "checks_ok": result.get("checks_ok"),
+            # Non-verdict facts from checks.py stdout (`S9 metric:
+            # report_committed=true`, bench/run_one.CHECKS_METRIC_RE):
+            # e.g. s9's commit discipline is measured, not gated — the
+            # report renders it as its own `report_committed` column.
+            "checks_metrics": result.get("checks_metrics") or {},
             "settle_elapsed_s": result.get("settle_elapsed_s"),
             "started_at": result.get("started_at"),
             "finished_at": result.get("finished_at"),
