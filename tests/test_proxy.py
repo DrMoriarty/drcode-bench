@@ -615,3 +615,104 @@ async def test_proxy_restart_clean() -> None:
         await proxy.stop()
     server.close()
     await server.wait_closed()
+
+
+# --- upstream set ↔ materialized catalog (§9 regression) ------------------------
+
+
+ALIAS_MATRIX = """
+[providers.copilot]
+base_url = "http://up:8000/v1"
+api_key = "k"
+
+[providers.copilot.models."glm-5.3-flash"]
+model = "x5-airun-code-large"
+max_context_tokens = 100000
+
+[providers.copilot.models."qwen3.8-27b"]
+model = "x5-airun-medium"
+max_context_tokens = 60000
+
+[providers.copilot.models."qwen3.6-35b"]
+model = "x5-airun-small"
+max_context_tokens = 260000
+
+[providers.copilot.models."deepseek-v4"]
+model = "x5-airun-large"
+max_context_tokens = 130000
+
+[[combo]]
+name = "incredible-four"
+research = "copilot/deepseek-v4"
+coding = "copilot/glm-5.3-flash"
+tester = "copilot/qwen3.8-27b"
+compaction = "copilot/qwen3.6-35b"
+"""
+
+
+def test_proxy_upstreams_cover_alias_materialized_catalog(tmp_path: Path) -> None:
+    """Regression (S7 × copilot.toml): the proxy upstream set must EQUAL
+    the materialized catalog's provider names — `apply_proxy_base` rewrites
+    EVERY catalog provider's base_url to `<proxy>/p/<name>` (§9), so a
+    virtual provider (`<p>--<alias>` from a §8 alias matrix entry) missing
+    from the upstreams is unroutable: every request 500s ("no upstream for
+    provider ...") and drcode retries until the scenario timeout. Building
+    the upstreams from the raw combo refs left exactly that hole."""
+    from bench.env_setup import _providers_for_combo, materialize_providers
+    from bench.run_one import _proxy_upstreams
+
+    matrix = tmp_path / "alias.toml"
+    matrix.write_text(ALIAS_MATRIX, encoding="utf-8")
+    providers, combos = load_matrix(matrix)
+    combo = combos[0]
+
+    upstreams = _proxy_upstreams(combo, matrix)
+    catalog, _ = materialize_providers(combo, _providers_for_combo(combo, providers, matrix))
+
+    assert set(upstreams) == set(catalog)
+    # The alias entries became virtual providers — the bare 'copilot' name
+    # must NOT be an upstream (nothing in the catalog references it).
+    assert "copilot" not in upstreams
+    assert set(upstreams) == {
+        "copilot--glm-5.3-flash",
+        "copilot--qwen3.8-27b",
+        "copilot--qwen3.6-35b",
+        "copilot--deepseek-v4",
+    }
+    # ... and each virtual provider still points at the real endpoint.
+    assert set(upstreams.values()) == {"http://up:8000/v1"}
+
+
+def test_proxy_upstreams_cover_ctx_clone_catalog(tmp_path: Path) -> None:
+    """Same invariant for the §1.2 ctx-conflict clones: a scenario
+    `[context]` cap conflicting across roles on one (provider, model) pair
+    spawns `<name>--ctx<N>` virtual providers — they must be routable
+    through the proxy too."""
+    from bench.env_setup import _providers_for_combo, materialize_providers
+    from bench.run_one import _proxy_upstreams
+
+    # coding and compaction share one alias pair; a scenario cap on coding
+    # alone is a conflict → compaction keeps the original virtual provider,
+    # coding is re-pointed at the `<name>--ctx5000` clone.
+    matrix = tmp_path / "alias.toml"
+    matrix.write_text(
+        ALIAS_MATRIX.replace(
+            'compaction = "copilot/qwen3.6-35b"', 'compaction = "copilot/glm-5.3-flash"'
+        ),
+        encoding="utf-8",
+    )
+    providers, combos = load_matrix(matrix)
+    combo = combos[0]
+    overrides = (("coding", 5000),)
+
+    upstreams = _proxy_upstreams(combo, matrix, scenario_overrides=overrides)
+    catalog, _ = materialize_providers(
+        combo,
+        _providers_for_combo(combo, providers, matrix),
+        scenario_overrides=overrides,
+    )
+
+    assert set(upstreams) == set(catalog)
+    # The first role in ROLES order keeps the original provider; the other
+    # group's clone carries that group's effective ctx.
+    assert "copilot--glm-5.3-flash--ctx100000" in upstreams
