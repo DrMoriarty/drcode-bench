@@ -606,9 +606,7 @@ def s4_tester_rounds(scenario_id: str = "s4_compaction_tester") -> list[list[dic
         [
             request_msg("Verify completed task: полный листинг data/listing.txt"),
             response_msg([tool_call_part("run_bash")]),
-            request_msg(
-                "[context summary]\n\nПрочитан листинг: 10256 строк, entry 010256 в конце."
-            ),
+            request_msg("[context summary]\n\nПрочитан листинг: 4500 строк, entry 004500 в конце."),
             response_msg([tool_call_part("set_verification")]),
             response_msg([text_part("Листинг проверен полностью.")]),
         ]

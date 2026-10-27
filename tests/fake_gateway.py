@@ -28,7 +28,7 @@ Served models (scripted per model id, see SCRIPTS):
   fixes kappa.WEIGHT (the reported usage is inflated per request, so
   drcode's mid-run compaction gate really trips);
 - ``s4-coder`` — the S4 coder: fixes report.py in one run_bash;
-- ``s4-tester`` — the S4 tester: reads the 10k-line listing in chunks
+- ``s4-tester`` — the S4 tester: reads the 4.5k-line listing in chunks
   (inflated usage → mid-round tester compaction), then stamps PASSED;
 - ``s8-coder`` / ``s8-tester`` — the S8 fix loop: the coder's round-1
   edit of pad() breaks the dependent test_row by design, the tester
@@ -510,13 +510,13 @@ def _s3_coder_script(messages: list[dict]) -> dict:
 S4_FIX_REPORT = (
     "printf 'def format_report(items):\\n    return \"\\\\n\\\\n\".join(items)\\n' > report.py"
 )
-# The tester reads the 10k-line listing in chunks (each run_bash result is
+# The tester reads the 4.5k-line listing in chunks (each run_bash result is
 # capped at 10 KiB by drcode); the INFLATED usage crosses the threshold
 # mid-round, so the tester compaction fires.
 S4_CAT_COMMANDS = [
-    "head -n 4000 data/listing.txt",
-    "sed -n '4001,8000p' data/listing.txt",
-    "tail -n 2256 data/listing.txt",
+    "head -n 1500 data/listing.txt",
+    "sed -n '1501,3000p' data/listing.txt",
+    "tail -n 1500 data/listing.txt",
 ]
 
 
