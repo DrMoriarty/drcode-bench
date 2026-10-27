@@ -913,6 +913,86 @@ def test_score_money_only_default_and_time_weight(pricing) -> None:
     assert timed["fast"]["quality_score"]["median"] < timed["cheap"]["quality_score"]["median"]
 
 
+def test_score_baseline_is_green_only(pricing) -> None:
+    """A failed pair dies early — it is fast and cheap — and must NOT
+    become the scenario's normalization baseline (§10: the score is
+    computed over the GREEN repeats). Green pairs keep their norms and
+    scores against the green-only baseline; a failed pair renders `—`;
+    a scenario with no green pair has no baseline at all; and a FAILED
+    free pair must not trip the m_min == 0 branch either."""
+    runs = [
+        # s5: failed pair is fastest AND cheapest — it must not set the baseline
+        make_metrics(
+            "r-fail",
+            "s5",
+            "priced",
+            verdict="failed",
+            wall_time_s={"settle": 10.0},
+            model_log=_traffic("model-a", 500_000, 0),
+        ),
+        make_metrics(
+            "r-cheap",
+            "s5",
+            "cheap",
+            wall_time_s={"settle": 200.0},
+            model_log=_traffic("model-a", 1_500_000, 500_000),
+        ),
+        make_metrics(
+            "r-fast",
+            "s5",
+            "fast",
+            wall_time_s={"settle": 100.0},
+            model_log=_traffic("model-a", 4_000_000, 1_000_000),
+        ),
+        # s6: no green pair → no meaningful baseline
+        make_metrics(
+            "r-f1",
+            "s6",
+            "pricey",
+            verdict="failed",
+            wall_time_s={"settle": 5.0},
+            model_log=_traffic("model-b", 100_000, 0),
+        ),
+        # s7: a FAILED zero-cost pair must not activate the m_min == 0
+        # branch for the green pairs
+        make_metrics(
+            "r-zfail",
+            "s7",
+            "zero-priced",
+            verdict="failed",
+            wall_time_s={"settle": 10.0},
+            model_log=_traffic("model-zero", 500_000, 0),
+        ),
+        make_metrics(
+            "r-zgreen",
+            "s7",
+            "slow",
+            wall_time_s={"settle": 100.0},
+            model_log=_traffic("model-a", 2_000_000, 0),
+        ),
+    ]
+    pairs = _pairs_by_combo(runs, pricing)
+    cheap, fast, failed = pairs["cheap"], pairs["fast"], pairs["priced"]
+    # baseline: green-only → t_min = 100, m_min = 2.0 (the failed pair's
+    # 10 s / $0.5 would have set both and scored itself 1.0)
+    assert cheap["quality_score"]["median"] == 1.0
+    assert fast["quality_score"]["median"] == 2.5
+    assert cheap["t_norm"] == 2.0 and cheap["m_norm"] == 1.0
+    assert fast["t_norm"] == 1.0 and fast["m_norm"] == 2.5
+    # the failed pair gets no score, but its norms still display against
+    # the same green baseline
+    assert failed["quality_score"]["median"] is None
+    assert failed["t_norm"] == 0.1 and failed["m_norm"] == 0.25
+    # no green pair in s6 → everything `—`
+    assert pairs["pricey"]["quality_score"]["median"] is None
+    assert pairs["pricey"]["t_norm"] is None and pairs["pricey"]["m_norm"] is None
+    # s7: the green pair is the baseline (m_min = 2.0), score 1.0; the
+    # failed free pair shows no score and m_norm 0 against it
+    assert pairs["slow"]["quality_score"]["median"] == 1.0
+    assert pairs["zero-priced"]["quality_score"]["median"] is None
+    assert pairs["zero-priced"]["m_norm"] == 0.0
+
+
 def test_html_spread_for_cost_and_score(tmp_path: Path, pricing) -> None:
     """Cost and score cells carry `$` prefixes / decimals — the HTML
     rendering still splits their spread onto the second line."""

@@ -329,18 +329,24 @@ def _apply_quality(
     per-repeat scores IS the pair's m_norm (the median commutes with the
     positive scaling); with α > 0 it is the spread-ready equivalent. All
     divisions run on RAW (`cost_usd` is aggregated unrounded) values, so
-    sub-dollar costs cannot zero out the score."""
+    sub-dollar costs cannot zero out the score.
+
+    Like `_pareto_frontier`, the baseline is GREEN-only (§10: the score
+    is computed over the GREEN repeats): a failed pair dies early — it is
+    fast and cheap, and letting it set t_min/m_min would inflate every
+    green pair's norms. A pair that is not all-green gets no score; a
+    scenario with no green pair has no baseline at all (everything `—`)."""
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     for p in pairs:
         by_scenario.setdefault(p["scenario"], []).append(p)
     for group in by_scenario.values():
-        times = [p["wall_time_s"]["median"] for p in group]
-        costs = [p["cost_usd"]["median"] for p in group]
-        t_min = min((t for t in times if t is not None), default=None)
-        m_min = min((c for c in costs if c is not None), default=None)
+        green_times = [p["wall_time_s"]["median"] for p in group if p["verdicts"] == ["green"]]
+        green_costs = [p["cost_usd"]["median"] for p in group if p["verdicts"] == ["green"]]
+        t_min = min((t for t in green_times if t is not None), default=None)
+        m_min = min((c for c in green_costs if c is not None), default=None)
         front = _pareto_frontier(group)
         for i, p in enumerate(group):
-            t_med, m_med = times[i], costs[i]
+            t_med, m_med = p["wall_time_s"]["median"], p["cost_usd"]["median"]
             # norms are display values (t_norm/m_norm columns) — keep them
             # readable; the score itself divides unrounded. A zero best
             # cost (free/local models priced at $0) is real data, not
@@ -355,16 +361,19 @@ def _apply_quality(
                 p["m_norm"] = 1.0 if m_med == 0 else None
             run_times, run_costs = raw[(p["scenario"], p["combo"])]
             scores = []
-            for t, c in zip(run_times, run_costs, strict=False):
-                if t is None or c is None or not t_min or m_min is None:
-                    continue
-                # money term: c/m_min normally; against a free best pair
-                # (m_min == 0) a zero-cost repeat sits at the optimum (1.0)
-                # and a positive cost cannot be normalized — no score.
-                money = c / m_min if m_min > 0 else (1.0 if c == 0 else None)
-                if money is None:
-                    continue
-                scores.append(time_weight * (t / t_min) + money)
+            # the score is defined only over the GREEN repeats — a
+            # non-green pair is ranked by outcome class first anyway
+            if p["verdicts"] == ["green"]:
+                for t, c in zip(run_times, run_costs, strict=False):
+                    if t is None or c is None or not t_min or m_min is None:
+                        continue
+                    # money term: c/m_min normally; against a free best pair
+                    # (m_min == 0) a zero-cost repeat sits at the optimum (1.0)
+                    # and a positive cost cannot be normalized — no score.
+                    money = c / m_min if m_min > 0 else (1.0 if c == 0 else None)
+                    if money is None:
+                        continue
+                    scores.append(time_weight * (t / t_min) + money)
             p["quality_score"] = _agg(scores) if scores else _agg([None] * len(run_times))
             p["pareto"] = i in front
 
