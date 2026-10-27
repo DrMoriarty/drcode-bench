@@ -66,6 +66,15 @@ def overlap(a, b):
     return min(a[1], b[1]).timestamp() - max(a[0], b[0]).timestamp()
 
 
+def is_model_response(msg: dict) -> bool:
+    """True when a transcript message is a billed model response (as opposed
+    to a pipeline-composed user prompt — e.g. a requeue report injected into
+    the coder transcript with the queue timestamp, not the model's). The
+    same predicate distinguishes responses in check_gate_recorder's
+    tag→role matching."""
+    return msg.get("kind") == "response" or msg.get("role") == "response"
+
+
 def load_tasks(workspace: Path) -> list[dict]:
     tasks_dir = workspace / ".drcode" / "tasks"
     return [
@@ -76,11 +85,16 @@ def load_tasks(workspace: Path) -> list[dict]:
 
 def check_gate_transcripts(tasks: list[dict], failures: list[str]) -> bool:
     """The gate over the persisted transcripts (§7: no development while
-    testing is in flight): a CODER message timestamp strictly inside a
-    tester round's [start, end] interval means both agents were in flight
-    at once. (Interval-vs-interval spans would false-bite: one task's
-    coder transcript legitimately spans the gaps where other testing
-    rounds — e.g. its own failed round before a follow-up — ran.)
+    testing is in flight): a CODER *model response* timestamp strictly
+    inside a tester round's [start, end] interval means both agents were
+    in flight at once. Only billed model responses count (the same
+    distinction check_gate_recorder makes when matching usage): a
+    pipeline-composed user prompt — e.g. a requeue report delivered into
+    the coder transcript with the queue's timestamp — is not development
+    activity and must not bite the gate. (Interval-vs-interval spans would
+    false-bite too: one task's coder transcript legitimately spans the gaps
+    where other testing rounds — e.g. its own failed round before a
+    follow-up — ran.)
     Returns True when there was tester activity to check at all."""
     tester: list[tuple[str, tuple]] = []
     for t in tasks:
@@ -95,6 +109,8 @@ def check_gate_transcripts(tasks: list[dict], failures: list[str]) -> bool:
     for t in tasks:
         label = f"{t.get('kind')}:{t.get('title')!r}"
         for msg in t.get("messages") or []:
+            if not is_model_response(msg):
+                continue
             ts = parse_ts(msg.get("timestamp"))
             if ts is None:
                 continue
@@ -146,7 +162,7 @@ def check_gate_recorder(workspace: Path, failures: list[str]) -> None:
         ):
             for group in groups:
                 for msg in group:
-                    if msg.get("kind") != "response" and msg.get("role") != "response":
+                    if not is_model_response(msg):
                         continue
                     usage = msg.get("usage")
                     if not isinstance(usage, dict):
