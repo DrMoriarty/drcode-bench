@@ -59,8 +59,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .env_setup import EnvSetupError, prepare_run, subprocess_env
+from .env_setup import (
+    EnvSetupError,
+    _providers_for_combo,
+    materialize_providers,
+    prepare_run,
+    subprocess_env,
+)
 from .matrix import (
+    Combo,
     MatrixError,
     check_research_override_assigned,
     effective_max_context,
@@ -90,6 +97,35 @@ CHECKS_METRIC_RE = re.compile(
 
 class RunError(RuntimeError):
     """The run could not even start (infrastructure failure)."""
+
+
+def _proxy_upstreams(
+    combo: Combo,
+    matrix_path: Path,
+    scenario_overrides: tuple[tuple[str, int], ...] = (),
+) -> dict[str, str]:
+    """Proxy upstream set (§9): provider name → real base_url for EVERY
+    provider the generated catalog will contain.
+
+    The catalog is built from the MATERIALIZED provider set
+    (`env_setup.materialize_providers` — the exact call `prepare_run`
+    makes): alias matrix entries (§8) and ctx-conflict overrides (§1.2)
+    become virtual providers (`<p>--<alias>`, `<p>--ctx<N>`) that have no
+    name in the raw matrix, and `apply_proxy_base` rewrites every
+    catalog provider's base_url to `<proxy>/p/<name>`. Building upstreams
+    from the raw combo refs instead leaves those names unroutable — every
+    request 500s ("no upstream for provider ...") and drcode retries
+    until the scenario timeout (the S7 × copilot.toml hang).
+    """
+    from .proxy import upstreams_for_providers
+
+    raw_providers, _ = load_matrix(matrix_path)
+    catalog_providers, _ = materialize_providers(
+        combo,
+        _providers_for_combo(combo, raw_providers, matrix_path),
+        scenario_overrides=scenario_overrides,
+    )
+    return upstreams_for_providers(catalog_providers)
 
 
 @dataclass
@@ -267,11 +303,11 @@ async def run_benchmark(
     proxy = None
     proxy_spec = scenario.proxy
     if proxy_spec is not None or use_proxy:
-        from .proxy import FaultProxy, ProxyError, upstreams_for_providers
+        from .proxy import FaultProxy, ProxyError
 
-        providers, _ = load_matrix(matrix_path)
-        used = {ref.partition("/")[0] for ref in combo.roles().values()}
-        upstreams = upstreams_for_providers({name: providers[name] for name in sorted(used)})
+        upstreams = _proxy_upstreams(
+            combo, matrix_path, scenario_overrides=scenario.max_context_overrides
+        )
         proxy = FaultProxy(
             upstreams,
             proxy_spec.faults if proxy_spec else (),
