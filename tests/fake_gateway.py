@@ -28,8 +28,10 @@ Served models (scripted per model id, see SCRIPTS):
   fixes kappa.WEIGHT (the reported usage is inflated per request, so
   drcode's mid-run compaction gate really trips);
 - ``s4-coder`` — the S4 coder: fixes report.py in one run_bash;
-- ``s4-tester`` — the S4 tester: reads the 4.5k-line listing in chunks
-  (inflated usage → mid-round tester compaction), then stamps PASSED;
+- ``s4-tester`` — the S4 tester: reads the 4.5k-line listing in whole
+  100-line `sed -n 'A,Bp'` chunks (inflated usage → mid-round tester
+  compaction; resumes from the summary's read-through marker), then
+  stamps PASSED;
 - ``s8-coder`` / ``s8-tester`` — the S8 fix loop: the coder's round-1
   edit of pad() breaks the dependent test_row by design, the tester
   stamps set_verification(success=False, retry_here=True), the report
@@ -210,6 +212,31 @@ def _tester_script(messages: list[dict]) -> dict:
 
 
 def _compaction_script(messages: list[dict]) -> dict:
+    """Summary for any compaction role. For the S4 tester's listing reads
+    the summary embeds a 'read-through-line=NNNN' marker: the rendered
+    history shows the tool results (blocks '[tool result for run_bash]'),
+    and the marker records the last listing line they showed — the S4
+    tester resumes reading from it (the marker survives the map-reduce
+    form too: reduce sees the markers inside the map summaries). The
+    marker is parsed ONLY from tool-result blocks, never from the whole
+    request: the brief quotes the file's last line ('entry 004500…'), and
+    a whole-text scan would always read progress 4500 from the quote."""
+    request_text = json.dumps(messages, ensure_ascii=False)
+    best = 0
+    for match in re.finditer(r"read-through-line=(\d+)", request_text):
+        best = max(best, int(match.group(1)))
+    for segment in request_text.split("[tool result for run_bash]")[1:]:
+        for match in re.finditer(r"entry (\d{6}):", segment.split("\\n\\n[")[0]):
+            best = max(best, int(match.group(1)))
+    if best:
+        return {
+            "text": (
+                "Задача: починить format_report (разделитель записей); правка "
+                f"внесена. Листинг data/listing.txt прочитан по строку {best} "
+                f"из 4500 включительно (read-through-line={best}); чтение "
+                "продолжить со следующей строки."
+            )
+        }
     return {"text": "Задача: сделать shout() корректной; правка внесена, тесты зелёные."}
 
 
@@ -555,24 +582,49 @@ def _s3_coder_script(messages: list[dict]) -> dict:
 S4_FIX_REPORT = (
     "printf 'def format_report(items):\\n    return \"\\\\n\\\\n\".join(items)\\n' > report.py"
 )
-# The tester reads the 4.5k-line listing in chunks (each run_bash result is
-# capped at 10 KiB by drcode); the INFLATED usage crosses the threshold
-# mid-round, so the tester compaction fires.
-S4_CAT_COMMANDS = [
-    "head -n 1500 data/listing.txt",
-    "sed -n '1501,3000p' data/listing.txt",
-    "tail -n 1500 data/listing.txt",
-]
+# The tester reads the 4.5k-line listing in WHOLE chunks of 100 lines
+# (`sed -n 'A,Bp'` without pipes — the brief bans head/tail/grep filters;
+# 100 × ~44 chars ≈ 4.4 KiB, safely under drcode's 10 KiB run_bash cap, so
+# every portion is shown whole). The INFLATED usage crosses the threshold
+# mid-round, so the tester compaction fires; the compaction rewrites the
+# round in place — the pre-compaction reads are gone from the model view —
+# and the fake compaction summary carries a read-through marker the tester
+# resumes from (see _compaction_script / _s4_progress_in_summary).
+S4_LISTING_LINES = 4500
+S4_CHUNK_LINES = 100
+# The mid-round trip point: usage(t) = 300 + 2200·t (t = tool results in
+# view) crosses 80% × 30000 = 24000 at t = 11 → the compaction fires after
+# the 12th read result of a cycle (the live reading lags one boundary
+# behind) — 12 × 100 = 1200 lines per compaction cycle, the last cycle
+# (reads 37..45, lines 3601..4500) stays under the threshold, so its reads
+# SURVIVE in the transcript and checks.py can verify the shown coverage.
+S4_USAGE_PER_TOOL = 2200
 
 
-def _bash_calls(messages: list[dict]) -> int:
-    return sum(
-        1
-        for m in messages
-        if m.get("role") == "assistant"
-        for tc in (m.get("tool_calls") or [])
-        if (tc.get("function") or {}).get("name") == "run_bash"
-    )
+def _s4_shown_entries(messages: list[dict]) -> list[int]:
+    """Listing line numbers shown in the tool results of the CURRENT model
+    view (after a compaction the view is a summary — the pre-compaction
+    reads are gone, so this deliberately restarts at the summary's marker)."""
+    nums: list[int] = []
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        for match in re.finditer(r"^entry (\d{6}):", str(m.get("content") or ""), re.MULTILINE):
+            nums.append(int(match.group(1)))
+    return nums
+
+
+def _s4_progress_in_summary(messages: list[dict]) -> int:
+    """Reading progress recorded by the fake compaction summary (0 when no
+    summary is in the view): the 'read-through-line=NNNN' marker embedded
+    by _compaction_script."""
+    best = 0
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        for match in re.finditer(r"read-through-line=(\d+)", str(m.get("content") or "")):
+            best = max(best, int(match.group(1)))
+    return best
 
 
 def _s4_coder_script(messages: list[dict]) -> dict:
@@ -583,19 +635,23 @@ def _s4_coder_script(messages: list[dict]) -> dict:
 
 
 def _s4_tester_script(messages: list[dict]) -> dict:
-    """Tester for S4: reads the full listing in chunks (the brief's
-    acceptance requirement), then stamps PASSED. After the mid-round
-    compaction the chunk history is a summary — the continuation goes
-    straight to the verdict."""
+    """Tester for S4: reads the full listing in whole 100-line chunks of
+    `sed -n 'A,Bp'` (the brief's acceptance requirement, no pipes), then
+    stamps PASSED. Resumes from the max line shown in the CURRENT view —
+    after the mid-round compaction that view is a summary, so the resume
+    point comes from the summary's read-through marker (compaction erases
+    the pre-summary reads from the view; without the marker the script
+    would restart from line 1 and re-cross the inflated threshold forever,
+    compacting in a loop)."""
     if _called(messages, "set_verification"):
         return _bash_end_run("Листинг проверен полностью, задача verified.")
-    prompt_all = "\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "user")
-    if "[context summary]" in prompt_all:
+    shown = _s4_shown_entries(messages)
+    progress = max(max(shown, default=0), _s4_progress_in_summary(messages))
+    if progress >= S4_LISTING_LINES:
         return _call("set_verification", {"success": True}, "call_verdict")
-    n = _bash_calls(messages)
-    if n < len(S4_CAT_COMMANDS):
-        return _run_bash(S4_CAT_COMMANDS[n], f"call_cat_{n}")
-    return _call("set_verification", {"success": True}, "call_verdict")
+    start = progress + 1
+    end = min(start + S4_CHUNK_LINES - 1, S4_LISTING_LINES)
+    return _run_bash(f"sed -n '{start},{end}p' data/listing.txt", f"call_cat_{start}")
 
 
 # -- S7: fault injection (the proxy sits between drcode and THIS gateway) --------
@@ -1111,16 +1167,21 @@ USAGE = {"prompt_tokens": 120, "completion_tokens": 24, "total_tokens": 144}
 # - s3-coder: usage(n) = 300 + 1100·n crosses 80% × 5000 = 4000 at
 #   n = 4 (4724) — the mid-run/turn-boundary gate trips there — and
 #   stays under the hard limit 4850;
-# - s4-tester: usage(n) = 300 + 8000·n crosses 80% × 30000 = 24000 at
-#   n = 3 (24300, right after the third `cat`) — the mid-round gate
-#   trips there — and stays under the hard limit 29100.
+# - s4-tester: usage(n) = 300 + 2200·n crosses 80% × 30000 = 24000 at
+#   n = 11 (24500) — the mid-round gate trips there (the live reading lags
+#   one tool boundary behind, so the compaction fires after the 12th read
+#   result of a cycle) — and stays under the hard limit 29100. The trip
+#   point is tuned to the chunking in S4_CHUNK_LINES (100 lines/read,
+#   1200 lines per compaction cycle): the final cycle (reads 37..45) never
+#   re-crosses the threshold, so its reads survive the round rewrite and
+#   checks.py can verify the shown listing coverage.
 # In both cases the post-compaction continuation turn carries NO tool
 # results (the history is a summary), so it reports the bare base —
 # back under the threshold, and the compacted run settles instead of
 # looping pause→compact forever. The read_file budget guard reads the
 # same numbers, so at the trip point a further read is refused (a neutral
 # tool result — the gate handles the window).
-INFLATED_USAGE = {"s3-coder": (300, 1100), "s4-tester": (300, 8000)}
+INFLATED_USAGE = {"s3-coder": (300, 1100), "s4-tester": (300, S4_USAGE_PER_TOOL)}
 
 
 def _usage_for(model: str, messages: list[dict]) -> dict:
