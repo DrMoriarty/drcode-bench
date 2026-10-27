@@ -808,7 +808,7 @@ def analyze_task(
     }
 
 
-# --- the development/testing gate (§7 S6) ----------------------------------
+# --- coder/tester activity diagnostics (§7 S6, passive) --------------------
 
 
 def _ts_interval(messages: list[dict[str, Any]]):
@@ -824,8 +824,16 @@ def analyze_gate(
     raw_tasks: list[dict[str, Any]],
     log_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The pipeline gate «no development while testing is in flight»
-    (§2/§7 S6): coder and tester must never be in flight simultaneously.
+    """Coder/tester activity diagnostics (§2/§7 S6): the recorded
+    intersections of coder and tester in-flight activity.
+
+    NOT a gate verdict: the strict reading of «no development while
+    testing is in flight» false-bites by construction in multi-task
+    runs — with several tasks queued (a bug report from a FAILED
+    verdict, neighbouring briefs) drcode legitimately develops one task
+    while the tester verifies another. Overlap facts stay in `overlaps`
+    as passive diagnostics; the verdict classifies only whether testing
+    happened at all.
 
     Two independent sources:
 
@@ -836,12 +844,12 @@ def analyze_gate(
       before a follow-up;
     - the recorder log (§5, when the roles are distinguishable by model
       tag): per-request intervals [ts − latency, ts] of coder-tag vs
-      tester-tag entries must not overlap. Tags are mapped to roles by
-      matching recorder entries against persisted transcript responses
-      (same token pair, §10 cross-check); unmatched entries (the
-      compaction agent's, §1.5) never vote and never count.
+      tester-tag entries. Tags are mapped to roles by matching recorder
+      entries against persisted transcript responses (same token pair,
+      §10 cross-check); unmatched entries (the compaction agent's,
+      §1.5) never vote and never count.
 
-    verdict: "ok" | "OVERLAP" | "no-testing" | "unknown".
+    verdict: "ok" | "no-testing" | "unknown".
     """
     tester_rounds: list[tuple[str, tuple[datetime, datetime]]] = []
     coder_points: list[tuple[str, datetime]] = []
@@ -954,9 +962,7 @@ def analyze_gate(
                             }
                         )
 
-    if overlaps:
-        verdict = "OVERLAP"
-    elif tester_rounds:
+    if tester_rounds:
         verdict = "ok"
     elif raw_tasks:
         verdict = "no-testing"
@@ -969,9 +975,11 @@ def analyze_gate(
         "n_coder_messages": len(coder_points),
         "overlaps": overlaps,
         "remark": (
-            "coder activity must never intersect tester activity (the "
-            "_advance gate, §2/§7 S6); the recorder check applies only "
-            "when the roles are distinguishable by model tag"
+            "overlaps are PASSIVE diagnostics (§2/§7 S6): in multi-task "
+            "runs the coder legitimately works on other tasks while the "
+            "tester verifies one — they never affect the verdict; the "
+            "recorder source applies only when the roles are "
+            "distinguishable by model tag"
         ),
     }
 
@@ -1599,9 +1607,8 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
     else:
         tester_threshold_from_tester = None  # only unclassified observations
 
-    # The development/testing gate (§7 S6): coder and tester never in
-    # flight at the same time — transcripts first, recorder log on top
-    # when the roles are distinguishable by model tag.
+    # Coder/tester activity diagnostics (§7 S6, passive): overlap facts
+    # never gate the verdict — in multi-task runs they are legitimate.
     gate = analyze_gate(raw_tasks, log_entries)
 
     # Recorder §5 (§10): per-role requests/latency/tokens, plus the

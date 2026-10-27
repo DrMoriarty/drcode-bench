@@ -305,17 +305,20 @@ def test_summary_links_to_representative_run(tmp_path: Path) -> None:
     assert summary_rows[0].count("](r2/)") == 1
 
 
-def test_summary_shows_gate_verdict(tmp_path: Path) -> None:
-    """§7 S6: the run table carries the gate verdict; an overlap is
-    flagged in the run details."""
+def test_summary_gate_legacy_overlap_normalized(tmp_path: Path) -> None:
+    """§7 S6: the run table carries the gate verdict; a legacy `OVERLAP`
+    artifact (pre-retirement) renders as `ok` — overlaps are passive
+    diagnostics now — and the overlap facts surface as a passive
+    Diagnostic block in Run details, never as a GATE VIOLATION."""
     m = make_metrics("r-gate", "s6_queue_priority", "c1")
     m["gate"] = {"verdict": "OVERLAP", "overlaps": [{"detail": "x"}]}
     _write_run(tmp_path, m)
     out = generate_report(tmp_path)
     text = out.read_text(encoding="utf-8")
     assert "gate" in text
-    assert "OVERLAP" in text
-    assert "GATE VIOLATION" in text
+    assert "OVERLAP" not in text
+    assert "GATE VIOLATION" not in text
+    assert "Diagnostic (§7 S6, passive)" in text
 
 
 def test_generate_report_html(tmp_path: Path) -> None:
@@ -540,7 +543,7 @@ def test_report_has_glossary_section(tmp_path: Path) -> None:
     text = generate_report(tmp_path).read_text(encoding="utf-8")
     assert "## Glossary" in text
     assert "gate `ok`" in text
-    assert "gate `OVERLAP`" in text
+    assert "OVERLAP" not in text
     assert "stability `faults×N`" in text
     assert "stability `compact-fail×N`" in text
     assert "stability `net-retry×N`" in text
@@ -563,7 +566,7 @@ def test_html_glossary_tooltips(tmp_path: Path) -> None:
     text = out.with_suffix(".html").read_text(encoding="utf-8")
     # Gate cell (both tables: summary + per-run) and the counted
     # stability form are wrapped; the tooltip text is the definition.
-    assert '<abbr title="the gate' in text
+    assert '<abbr title="the coder/tester activity check' in text
     assert ">ok</abbr>" in text
     assert ">net-retry×3</abbr>" in text
     assert ">clean</abbr>" in text
@@ -619,15 +622,17 @@ def test_html_indented_block_line_terminates_paragraph() -> None:
     assert "<th>table</th>" in html
 
 
-def test_html_glossary_tooltips_overlap_warning_kept(tmp_path: Path) -> None:
-    """The runs-table gate cell `OVERLAP ⚠` is wrapped whole — the
-    warning mark survives next to the tooltip."""
+def test_html_legacy_overlap_verdict_normalized(tmp_path: Path) -> None:
+    """A legacy `OVERLAP` gate verdict (pre-retirement artifacts) renders
+    as `ok` in HTML — tooltip included, no warning mark, no trace of the
+    retired code."""
     m = make_metrics("r1", "s6_queue_priority", "c1")
     m["gate"] = {"verdict": "OVERLAP", "overlaps": [{"detail": "x"}]}
     _write_run(tmp_path, m)
     out = generate_report(tmp_path, html=True)
     text = out.with_suffix(".html").read_text(encoding="utf-8")
-    assert ">OVERLAP</abbr> ⚠" in text
+    assert ">ok</abbr>" in text
+    assert "OVERLAP" not in text
 
 
 # -- quality ranking: cost $, score = α·t_norm + β·m_norm, Pareto (§10) --------------
