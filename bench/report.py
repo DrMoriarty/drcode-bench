@@ -327,7 +327,9 @@ def _apply_quality(
     and `pareto`. The per-repeat score uses the repeat's own t and $ over
     the scenario's best pair medians — with α = 0 the median of the
     per-repeat scores IS the pair's m_norm (the median commutes with the
-    positive scaling); with α > 0 it is the spread-ready equivalent."""
+    positive scaling); with α > 0 it is the spread-ready equivalent. All
+    divisions run on RAW (`cost_usd` is aggregated unrounded) values, so
+    sub-dollar costs cannot zero out the score."""
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     for p in pairs:
         by_scenario.setdefault(p["scenario"], []).append(p)
@@ -340,22 +342,37 @@ def _apply_quality(
         for i, p in enumerate(group):
             t_med, m_med = times[i], costs[i]
             # norms are display values (t_norm/m_norm columns) — keep them
-            # readable; the score itself divides unrounded
+            # readable; the score itself divides unrounded. A zero best
+            # cost (free/local models priced at $0) is real data, not
+            # "unknown": the pair at the optimum shows m_norm 1.0, while a
+            # positive cost next to a free pair has no finite norm.
             p["t_norm"] = round(t_med / t_min, 2) if t_min and t_med is not None else None
-            p["m_norm"] = round(m_med / m_min, 2) if m_min and m_med is not None else None
+            if m_med is None or m_min is None:
+                p["m_norm"] = None
+            elif m_min > 0:
+                p["m_norm"] = round(m_med / m_min, 2)
+            else:
+                p["m_norm"] = 1.0 if m_med == 0 else None
             run_times, run_costs = raw[(p["scenario"], p["combo"])]
-            scores = [
-                time_weight * (t / t_min) + c / m_min
-                for t, c in zip(run_times, run_costs, strict=False)
-                if t is not None and c is not None and t_min and m_min
-            ]
+            scores = []
+            for t, c in zip(run_times, run_costs, strict=False):
+                if t is None or c is None or not t_min or m_min is None:
+                    continue
+                # money term: c/m_min normally; against a free best pair
+                # (m_min == 0) a zero-cost repeat sits at the optimum (1.0)
+                # and a positive cost cannot be normalized — no score.
+                money = c / m_min if m_min > 0 else (1.0 if c == 0 else None)
+                if money is None:
+                    continue
+                scores.append(time_weight * (t / t_min) + money)
             p["quality_score"] = _agg(scores) if scores else _agg([None] * len(run_times))
             p["pareto"] = i in front
 
 
 def _dollar(value: Any) -> str:
-    """Cost cell: `$0.123` (4 significant digits — run costs are small);
-    `—` for missing values."""
+    """Cost cell: `$0.123` (4 significant digits — run costs are small;
+    the aggregator keeps money raw, so this is the only rounding step and
+    sub-dollar costs survive intact); `—` for missing values."""
     return "—" if value is None else f"${float(value):.4g}"
 
 
@@ -458,17 +475,28 @@ def _tokens_by_role(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _agg(values: list[float | int | None]) -> dict[str, Any]:
+def _agg(values: list[float | int | None], ndigits: int | None = 1) -> dict[str, Any]:
     """Spread-aware aggregate of one metric over the repeats of a pair
-    (§10: medians/разброс; a single run is a repeat count of 1)."""
+    (§10: medians/разброс; a single run is a repeat count of 1). The
+    default `ndigits=1` suits seconds/counters; pass `ndigits=None` for
+    raw values — money is aggregated UNROUNDED and trimmed only at render
+    time (`_dollar`, 4 significant digits), else a ~$0.01 run cost
+    collapses to 0.0 and renders as `$0`."""
     known = [float(v) for v in values if v is not None]
     if not known:
         return {"n": len(values), "median": None, "min": None, "max": None}
+    if ndigits is None:
+        return {
+            "n": len(values),
+            "median": statistics.median(known),
+            "min": min(known),
+            "max": max(known),
+        }
     return {
         "n": len(values),
-        "median": round(statistics.median(known), 1),
-        "min": round(min(known), 1),
-        "max": round(max(known), 1),
+        "median": round(statistics.median(known), ndigits),
+        "min": round(min(known), ndigits),
+        "max": round(max(known), ndigits),
     }
 
 
@@ -535,7 +563,9 @@ def aggregate_pairs(
                 "verdicts": verdicts,
                 "outcome_class": _outcome_class(verdicts),
                 "pass_rate": sum(1 for m in group if (m.get("verdict")) == "green") / len(group),
-                "cost_usd": _agg(run_costs),
+                # money stays raw (see `_agg`): `_dollar` rounds at render,
+                # and the score below divides by these medians
+                "cost_usd": _agg(run_costs, ndigits=None),
                 "wall_time_s": wall,
                 "compactions": compactions,
                 "testing_rounds": rounds,

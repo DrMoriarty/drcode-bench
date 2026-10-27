@@ -582,6 +582,16 @@ price_output = 3.0
 
 [providers.fake-a.models.model-free]
 
+[providers.fake-a.models.model-zero]
+price_input = 0.0
+price_output = 0.0
+
+[[combo]]
+name   = "zero-priced"
+coding = "fake-a/model-zero"
+tester = "fake-a/model-zero"
+compaction = "fake-a/model-zero"
+
 [[combo]]
 name   = "priced"
 coding = "fake-a/model-a"
@@ -717,6 +727,64 @@ def test_cost_column_and_unpriced_dash(tmp_path: Path, pricing) -> None:
     assert "| 100% | — | — |" in unpriced_row
     # the scenario-winner view keeps both, with the t_norm/m_norm factors
     assert "t_norm" in text and "m_norm" in text
+
+
+def test_subdollar_cost_not_rounded_to_zero(pricing) -> None:
+    """Sub-dollar costs survive aggregation: `cost_usd` is aggregated raw
+    (rounding happens only at render time, `_dollar`), and the score of a
+    small-but-nonzero-cost scenario stays computable. Regression: the old
+    `round(x, 1)` collapsed a ~$0.0106 run to 0.0, rendering `$0` in the
+    cost column and disabling the score's `m_min` guard (`—` everywhere)."""
+    # model-a at $1/$1 per 1M: (10 000 + 600)/1e6 = $0.0106 per repeat
+    runs = [
+        make_metrics("r1", "s9", "priced", model_log=_traffic("model-a", 10_000, 600)),
+        make_metrics("r2", "s9", "priced", model_log=_traffic("model-a", 20_000, 600)),
+    ]
+    cost = _pairs_by_combo(runs, pricing)["priced"]["cost_usd"]
+    assert cost["n"] == 2
+    assert cost["median"] == pytest.approx(0.0156)
+    assert cost["min"] == pytest.approx(0.0106)
+    assert cost["max"] == pytest.approx(0.0206)
+    # score divides by the RAW best median (this pair's own median here);
+    # with α = 0 the median of the per-repeat scores is the m_norm = 1.0
+    # (min/max are the per-repeat ratios 0.0106/0.0156 and 0.0206/0.0156,
+    # displayed at the score column's 1-decimal granularity)
+    scores = _pairs_by_combo(runs, pricing)["priced"]["quality_score"]
+    assert scores["median"] is not None
+    assert scores["median"] == pytest.approx(1.0)
+    assert scores["min"] == pytest.approx(round(0.0106 / 0.0156, 1))
+    assert scores["max"] == pytest.approx(round(0.0206 / 0.0156, 1))
+
+
+def test_subdollar_cost_renders_and_scores(tmp_path: Path, pricing) -> None:
+    """Rendered summary: a ~$0.0106 run shows `$0.0106` (not `$0`) and the
+    single-pair scenario's score cell is `1`, not `—`."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s9", "priced", model_log=_traffic("model-a", 10_000, 600)),
+    )
+    text = generate_report(tmp_path, pricing=pricing).read_text(encoding="utf-8")
+    summary = text.split("## Summary", 1)[1].split("## Scenario winners", 1)[0]
+    (row,) = [r for r in summary.splitlines() if "| ◉ priced " in r]
+    assert "| $0.0106 | 1 |" in row
+
+
+def test_zero_cost_score_not_disabled(pricing) -> None:
+    """A priced-at-$0 model yields cost 0.0 — real data (free/local), not
+    'unknown': the pair keeps m_norm and a score (money term pinned at the
+    optimum 1.0), while an unpriced pair still renders `—`."""
+    runs = [
+        make_metrics(
+            "r1", "s8", "zero-priced", model_log=_traffic("model-zero", 1_000_000, 1_000_000)
+        ),
+        make_metrics("r2", "s8", "unpriced", model_log=_traffic("model-free", 1_000_000, 0)),
+    ]
+    pairs = _pairs_by_combo(runs, pricing)
+    assert pairs["zero-priced"]["cost_usd"]["median"] == 0.0
+    assert pairs["zero-priced"]["m_norm"] == 1.0
+    assert pairs["zero-priced"]["quality_score"]["median"] == 1.0
+    assert pairs["unpriced"]["cost_usd"]["median"] is None
+    assert pairs["unpriced"]["quality_score"]["median"] is None
 
 
 def test_pareto_frontier(pricing) -> None:
