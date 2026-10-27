@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from bench.report import (
     _md_to_html,
+    _natural_key,
     _tokens_by_role,
     aggregate_pairs,
     discover_runs,
@@ -107,6 +108,44 @@ def test_discover_runs_ignores_stray_dirs(tmp_path: Path) -> None:
     (tmp_path / "loose.json").write_text("{}")
     assert [p.name for p in discover_runs(tmp_path)] == ["r1"]
     assert discover_runs(tmp_path / "missing") == []
+
+
+def test_natural_key_orders_scenarios() -> None:
+    """Digit runs compare as integers (s9 < s10 < s13); the text fallback
+    keeps s2a < s2b — lexicographic order puts '0' before '_' and gets
+    both wrong."""
+    names = [
+        "s10_research_facts",
+        "s1_happy",
+        "s2a_bug_followup",
+        "s2b_bug_report",
+        "s9_research_count",
+        "s13_research_feature",
+    ]
+    assert sorted(names, key=_natural_key) == [
+        "s1_happy",
+        "s2a_bug_followup",
+        "s2b_bug_report",
+        "s9_research_count",
+        "s10_research_facts",
+        "s13_research_feature",
+    ]
+
+
+def test_report_rows_natural_scenario_order(tmp_path: Path) -> None:
+    """Regression: s10 must not precede s1 in the report tables. The
+    Summary and scenario-winner rows go in natural scenario order (the
+    Runs / Run details tables inherit the same ordering from
+    generate_report)."""
+    _write_run(tmp_path, make_metrics("r-b", "s10_x", "combo-a"))
+    _write_run(tmp_path, make_metrics("r-a", "s1_y", "combo-a"))
+    text = generate_report(tmp_path).read_text(encoding="utf-8")
+
+    summary = text.split("## Summary", 1)[1].split("## Scenario winners", 1)[0]
+    assert summary.index("| s1_y ") < summary.index("| s10_x ")
+
+    winners = text.split("## Scenario winners", 1)[1].split("## Runs", 1)[0]
+    assert winners.index("| s1_y ") < winners.index("| s10_x ")
 
 
 def test_aggregate_pairs_single_run_per_pair() -> None:

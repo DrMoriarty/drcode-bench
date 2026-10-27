@@ -33,6 +33,18 @@ from .metrics import MetricsError, extract_run_metrics
 
 SCHEMA = "report/v1"
 
+# Natural sort: digit runs compare as integers, so scenario ids order
+# s1 < s2a < s2b < ... < s9 < s10 < s13 instead of lexicographic
+# (where '0' < '_', putting s10 before s1). Text parts sort as (0, str),
+# digit parts as (1, int) — mixed positions never raise TypeError.
+_NAT = re.compile(r"(\d+)")
+
+
+def _natural_key(text: str) -> tuple:
+    """Sort key: digit runs compare as integers, so s9 < s10 < s13."""
+    return tuple((1, int(part)) if part.isdigit() else (0, part) for part in _NAT.split(text))
+
+
 # §10: the terse codes of the `gate` and `stability` columns, spelled out
 # both in the report's Glossary section (`_glossary_lines`) and as hover
 # tooltips in the HTML rendering (`_glossary_abbr`). Keys match the cell
@@ -391,7 +403,10 @@ def discover_runs(runs_dir: Path) -> list[Path]:
     if not runs_dir.is_dir():
         return []
     out = []
-    for path in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+    for path in sorted(
+        (p for p in runs_dir.iterdir() if p.is_dir()),
+        key=lambda p: _natural_key(p.name),
+    ):
         if (path / "result.json").is_file() or (path / "metrics.json").is_file():
             out.append(path)
     return out
@@ -542,7 +557,10 @@ def aggregate_pairs(
 
     pairs = []
     raw: dict[tuple[str, str], tuple[list[Any], list[Any]]] = {}
-    for (scenario, combo), group in sorted(groups.items()):
+    for (scenario, combo), group in sorted(
+        groups.items(),
+        key=lambda kv: (_natural_key(kv[0][0]), _natural_key(kv[0][1])),
+    ):
         run_times = [m.get("wall_time_s", {}).get("settle") for m in group]
         run_costs = [
             _run_cost_usd(
@@ -729,7 +747,7 @@ def _winner_rows(pairs: list[dict[str, Any]]) -> list[str]:
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     for p in pairs:
         by_scenario.setdefault(p["scenario"], []).append(p)
-    for scenario in sorted(by_scenario):
+    for scenario in sorted(by_scenario, key=_natural_key):
         ranked = sorted(by_scenario[scenario], key=_rank_key)
         for rank, p in enumerate(ranked, start=1):
             lines.append(
@@ -945,6 +963,17 @@ def generate_report(
 
     run_dirs = discover_runs(runs_dir)
     runs = [load_run(d) for d in run_dirs]
+    # Runs / Run details tables: natural order by (scenario, combo, run_id)
+    # so string-named scenarios render s1→s13 instead of timestamp order
+    # with s10-first ties; the run-dir timestamp stays the primary key
+    # within one scenario+combo via the run_id suffix.
+    runs.sort(
+        key=lambda m: (
+            _natural_key(m.get("scenario") or ""),
+            _natural_key(m.get("combo") or ""),
+            m.get("run_id") or "",
+        )
+    )
     pairs = aggregate_pairs(runs, pricing, time_weight)
 
     lines = [
