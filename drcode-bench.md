@@ -184,14 +184,41 @@ Headless-CLI (`drcode --bug-report`) только создаёт задачи. �
   (формат см. `models.json.example`, поля `Provider`/`ModelEntry`).
 - `<workspace>/.drcode/drcode.json` — flat-слой (если нужно) + ключ `models`
   с per-role выборкой.
-- `<workspace>/.drcode/settings.json` (`ProjectSettings`):
-  - `task_finalization`: `"testing"` (без коммитов) или `"testing_commit"`
-    с локальным bare-remote — **никогда не пушить на GitHub**, прогон не должен
-    зависеть от внешней сети;
+- `<workspace>/.drcode/settings.json` (`ProjectSettings`) — **полный набор
+  пинов** (`bench.env_setup.project_settings`): сгенерированный файл целиком
+  описывает проектную конфигурацию прогона, смена дефолта в drcode не должна
+  менять поведение bench незаметно (пример near-miss: гипотетическая смена
+  дефолта `git_policy.research` PUSH → OFF/LOCAL молча убрала бы
+  `git_commit_docs` и утопила бы все research-сценарии):
+  - `verification: "tester"` + `git_policy` (явно, современный формат —
+    явные ключи побеждают legacy-миграцию): `{"tester": "push",
+    "research": "push"}` при `testing_commit` (тестер коммитит и пушит в
+    локальный bare-remote — **никогда не пушить на GitHub**, прогон не
+    должен зависеть от внешней сети) либо `{"tester": "off",
+    "research": "push"}` при `testing` (без коммитов; ровно то, во что
+    legacy-миграция drcode отображает `task_finalization="testing"`);
+    legacy-ключ `task_finalization` пишется рядом для читаемости;
+  - `max_dev_rounds: 3` (глубина fix-loop — объект проверки в s8);
   - `stall_nudge`: `"never"` на время замеров (отдельный сценарий может
     намеренно включить watchdog);
   - `completed_retention`: `"never"` (cleanup на старте не должен трогать
-    артефакты).
+    артефакты);
+  - `task_isolation: "off"`, `parallel_tasks: 1`,
+    `worktree_removal: "on_delete"` (последний под isolation=off спит, но
+    запинен для полноты);
+  - `github_enabled: false` (§13: никаких внешних сетей),
+    `keep_awake: false` (headless-процесс bench не держит sleep-assertion);
+  - UI-only настройки (esc_abort, voice_*, ntfy_*, github token/repo/interval,
+    isolation_start_branch) не пинятся — на headless-прогон они не влияют;
+    аудит этого разделения держит тест (unpinned-field audit в
+    tests/test_env_setup.py).
+  - Громкие отказы: загрузчик drcode молча откатывается к дефолтам при
+    ValidationError или незнакомом ключе, поэтому pre-flight
+    (`verify_resolution` → `check_settings_roundtrip`) прогоняет
+    сгенерированный файл через родной `ProjectSettingsStore` drcode и
+    требует, чтобы каждый пин пережил загрузку с тем же значением —
+    переименование/миграция ключа в drcode роняет прогон до старта
+    агентов, а не молча снимает пин.
 - Переменные окружения subprocess: `XDG_CONFIG_HOME=<config-home>`,
   все `DRCODE_*` — вычищены, `HOME` можно перенаправить для полной изоляции.
 
@@ -546,8 +573,8 @@ drcode-bench/
   выборку для всех ролей — держать окружение чистым.
 - Репозиторный `.env` drcode протекает через pydantic-settings при запуске из
   исходников — в bench-процессе окружение вычищать полностью (свежий subprocess).
-- `git push` тестера: `task_finalization="testing"` или локальный bare-remote;
-  никогда GitHub.
+- `git push` тестера: `git_policy.tester="off"` (`testing`) или `"push"` в
+  локальный bare-remote (`testing_commit`); никогда GitHub.
 - `stall_nudge="never"` на время замеров (иначе watchdog оборвёт медленную
   модель); отдельный сценарий может намеренно его тестировать.
 - Харнесс не «открывает» задачи в чате (`viewed_id` не трогать) — иначе

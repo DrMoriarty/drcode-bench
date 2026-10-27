@@ -20,7 +20,9 @@ import pytest
 from bench.env_setup import (
     EnvSetupError,
     RunPaths,
+    check_settings_roundtrip,
     prepare_run,
+    project_settings,
     run_preflight_subprocess,
     subprocess_env,
     verify_resolution,
@@ -121,12 +123,23 @@ def test_prepare_run_tree(scenario_dir, combo, matrix_file, tmp_path, monkeypatc
         "compaction": "fake-b/small-8b",
     }
 
-    # settings.json: benchmark hygiene values
+    # settings.json: the FULL pin contract (`project_settings`, "testing"
+    # shape — the tester verifies without committing, research keeps
+    # git_commit_docs). Guarded by exact equality: dropping a pin here
+    # must fail the test, not silently fall back to a drcode default.
     settings = json.loads(paths.settings_file.read_text(encoding="utf-8"))
     assert settings == {
         "task_finalization": "testing",
+        "verification": "tester",
+        "git_policy": {"tester": "off", "research": "push"},
+        "max_dev_rounds": 3,
         "stall_nudge": "never",
         "completed_retention": "never",
+        "task_isolation": "off",
+        "parallel_tasks": 1,
+        "worktree_removal": "on_delete",
+        "github_enabled": False,
+        "keep_awake": False,
     }
 
     # no remote for plain "testing"
@@ -164,6 +177,10 @@ def test_prepare_run_testing_commit_local_remote(scenario_dir, combo, matrix_fil
 
     settings = json.loads(paths.settings_file.read_text(encoding="utf-8"))
     assert settings["task_finalization"] == "testing_commit"
+    # testing_commit shape: the tester commits and pushes (to the LOCAL
+    # bare remote only), research keeps git_commit_docs.
+    assert settings["verification"] == "tester"
+    assert settings["git_policy"] == {"tester": "push", "research": "push"}
 
 
 def test_prepare_run_rejects_bad_finalization(scenario_dir, combo, matrix_file, tmp_path):
@@ -182,6 +199,81 @@ def test_prepare_run_rejects_existing_dir(scenario_dir, combo, matrix_file, tmp_
     run_dir.mkdir(parents=True)
     with pytest.raises(EnvSetupError, match="already exists"):
         prepare_run(scenario_dir, combo, run_dir, matrix_path=matrix_file)
+
+
+# -- settings.json pin contract (full ProjectSettings coverage) -------------------
+
+
+def test_settings_pins_cover_every_project_settings_field() -> None:
+    """Audit guard: EVERY field of drcode's ProjectSettings is either
+    pinned in `project_settings()` or on the deliberate UI-only exemption
+    list (preferences that cannot affect a headless run). A new or
+    previously unpinned behavioral field in drcode must surface HERE —
+    forcing an explicit pin-or-exempt decision — never silently fall back
+    to a drcode default."""
+    from drcode.settings import ProjectSettings
+
+    pinned: set[str] = set()
+    for finalization in ("testing", "testing_commit"):
+        pinned |= set(project_settings(finalization))
+    exempt = {
+        # UI-only preferences, no effect on a headless run.
+        "esc_abort",
+        "isolation_start_branch",
+        "github_token",
+        "github_repo",
+        "github_sync_interval",
+        "notifications_enabled",
+        "ntfy_topic",
+        "voice_api_url",
+        "voice_api_key",
+        "voice_asr_model",
+        "voice_tts_model",
+        "voice_tts_voice",
+        "voice_tts_completed",
+        "voice_tts_tester_failed",
+        "voice_tts_queue_empty",
+        "voice_language",
+    }
+    fields = set(ProjectSettings.model_fields)
+    unaudited = fields - pinned - exempt
+    assert not unaudited, (
+        f"unaudited ProjectSettings fields: {sorted(unaudited)} — pin them "
+        "in bench.env_setup.project_settings or exempt them as UI-only here"
+    )
+
+
+def test_settings_roundtrip_and_loud_failure(scenario_dir, combo, matrix_file, tmp_path):
+    """The generated pins must survive drcode's own ProjectSettingsStore —
+    whose load() silently falls back to the ALL-DEFAULTS ProjectSettings
+    on an unknown key or a ValidationError. A key renamed/migrated in
+    drcode must therefore fail the pre-flight LOUDLY, never silently
+    un-pin the run's configuration."""
+    run_dir = tmp_path / "runs" / "rt"
+    paths = prepare_run(scenario_dir, combo, run_dir, matrix_path=matrix_file)
+
+    # Happy path: every pin round-trips (also part of the pre-flight).
+    check_settings_roundtrip(paths.workspace)
+    verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
+
+    settings_path = paths.settings_file
+    raw = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    # A key drcode no longer knows (e.g. renamed upstream): the store
+    # ignores it and uses the default — the round-trip check must catch it.
+    renamed = dict(raw)
+    renamed["stall_nudge_renamed"] = renamed.pop("stall_nudge")
+    settings_path.write_text(json.dumps(renamed), encoding="utf-8")
+    with pytest.raises(EnvSetupError, match="stall_nudge"):
+        verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
+
+    # A value whose shape drcode migrated (ValidationError → all-defaults
+    # fallback): the loaded value no longer equals the pin — loud failure.
+    drifted = dict(raw)
+    drifted["git_policy"] = {"tester": "banana", "research": "push"}
+    settings_path.write_text(json.dumps(drifted), encoding="utf-8")
+    with pytest.raises(EnvSetupError, match="git_policy"):
+        verify_resolution(paths.workspace, paths.config_home, combo, matrix_path=matrix_file)
 
 
 def test_subprocess_env_strips_drcode_and_pins_xdg(tmp_path):

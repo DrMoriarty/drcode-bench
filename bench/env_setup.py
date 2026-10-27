@@ -13,7 +13,7 @@ One run = one isolated tmp tree:
     │       │                 # settings (compaction_threshold); provider
     │       │                 # fields never live here (drcode ≥ 0.5 moves
     │       │                 # them into the catalog / custom models)
-    │       └── settings.json # task_finalization / stall_nudge / completed_retention
+    │       └── settings.json # FULL pinned ProjectSettings (project_settings())
     ├── config-home/          # becomes XDG_CONFIG_HOME of the run subprocess
     │   └── drcode/
     │       └── models.json   # provider catalog of this combo
@@ -31,7 +31,11 @@ for ALL roles (providers.resolve precedence, plan §1.1/§13).
 Pre-flight check (§3 end): `verify_resolution()` loads the generated
 config exactly like drcode would and asserts that
 `drcode.providers.resolve(config, role)` returns the expected model for
-each role — before any application code is started.
+each role — before any application code is started. It also round-trips
+the generated settings.json through drcode's own `ProjectSettingsStore`
+(`check_settings_roundtrip`): the file pins the FULL project
+configuration (`project_settings()`), and a key renamed in drcode must
+fail the pre-flight loudly, not silently fall back to drcode's defaults.
 """
 
 from __future__ import annotations
@@ -61,6 +65,107 @@ from .matrix import (
 FINALIZATION_CHOICES = ("testing", "testing_commit")
 
 PROJECT_STATE_DIRNAME = ".drcode"  # keep in sync with drcode.config
+
+
+# -- project settings pins -------------------------------------------------------
+#
+# The generated settings.json must FULLY describe the run's project-level
+# configuration: a default flip in drcode (`drcode.settings.ProjectSettings`)
+# must never silently change bench behavior. The near-miss that motivated
+# this: a hypothetical `git_policy.research` default change (PUSH →
+# OFF/LOCAL) would have silently removed the research agent's
+# git_commit_docs tool and sunk every research scenario (s9–s11) without
+# a visible cause.
+#
+# Audit of `ProjectSettings` (source of truth: drcode/src/drcode/settings.py):
+# every field a HEADLESS run can observe is pinned below. UI-only
+# preferences (esc_abort, voice_*, ntfy_*, github token/repo/interval,
+# isolation_start_branch) cannot affect a run and stay unpinned — the
+# test suite keeps that split honest (tests/test_env_setup.py,
+# unpinned-field audit).
+#
+# NOTE on loud failures: drcode's ProjectSettingsStore.load() silently
+# falls back to the ALL-DEFAULTS ProjectSettings on a ValidationError or
+# a key it no longer knows — a renamed/removed key would NOT fail there.
+# So the pre-flight (`verify_resolution` → `check_settings_roundtrip`)
+# loads the generated file through drcode's own store and asserts every
+# pinned key survives with the same value: a key rename/migration in
+# drcode fails the run BEFORE any agent work, never silently un-pins it.
+
+
+def project_settings(task_finalization: str) -> dict[str, object]:
+    """The pinned settings.json payload (rationale: block comment above).
+
+    `task_finalization` (FINALIZATION_CHOICES) is kept as the legacy flat
+    key AND expanded into the modern shape drcode's migration
+    (`_migrate_legacy_finalization`) would derive from it — the explicit
+    `verification`/`git_policy` keys win over the legacy migration, so the
+    modern keys alone fully determine the behavior:
+
+    - `verification: "tester"` — the benchmark exists to exercise the
+      tester (both finalization choices imply a tester round);
+    - `git_policy.tester` follows the finalization: `"push"` for
+      testing_commit (the tester commits and pushes to the LOCAL bare
+      remote inside the run tree — never GitHub, §13), `"off"` for
+      testing (exactly what drcode's legacy migration maps "testing"
+      to — no commits at all);
+    - `git_policy.research: "push"` — the research agent keeps
+      git_commit_docs (s9–s12 depend on it); pushes go to the run's own
+      remote only.
+    """
+    tester_policy = "push" if task_finalization == "testing_commit" else "off"
+    return {
+        "task_finalization": task_finalization,
+        "verification": "tester",
+        "git_policy": {"tester": tester_policy, "research": "push"},
+        "max_dev_rounds": 3,  # drcode default, pinned: s8 asserts the fix-loop depth («round 2/3»)
+        "stall_nudge": "never",  # no watchdog nudges during timing measurements
+        "completed_retention": "never",  # startup cleanup must not touch run artifacts
+        "task_isolation": "off",  # tasks develop in the run's own workspace, never worktrees
+        "parallel_tasks": 1,  # deterministic single-slot development
+        "worktree_removal": "on_delete",  # dormant under isolation=off, pinned anyway
+        "github_enabled": False,  # §13: a run must never touch the external network
+        "keep_awake": False,  # a headless bench subprocess holds no system-sleep assertion
+    }
+
+
+# Legacy keys drcode's migration deliberately consumes (dropped from the
+# loaded model — see drcode.settings._migrate_legacy_finalization); they
+# are exempt from the round-trip equality check.
+_LEGACY_MIGRATED_SETTINGS_KEYS = ("task_finalization",)
+
+
+def check_settings_roundtrip(workspace: Path) -> None:
+    """Load the generated settings.json through drcode's OWN
+    `ProjectSettingsStore` and assert every pinned key survives with the
+    same value (see the pins block comment above).
+
+    drcode's loader silently falls back to the all-defaults
+    `ProjectSettings` on a ValidationError or a key it no longer knows —
+    so a key renamed/migrated in drcode must fail HERE (loud, before the
+    run starts) instead of silently un-pinning the bench configuration.
+    """
+    from drcode.settings import ProjectSettingsStore
+
+    raw = json.loads(
+        (Path(workspace) / PROJECT_STATE_DIRNAME / "settings.json").read_text(encoding="utf-8")
+    )
+    loaded = ProjectSettingsStore(Path(workspace)).load().model_dump(mode="json")
+    for key, value in raw.items():
+        if key in _LEGACY_MIGRATED_SETTINGS_KEYS:
+            continue
+        if key not in loaded:
+            raise EnvSetupError(
+                f"settings pin '{key}' was not loaded by drcode's "
+                "ProjectSettingsStore — the key was renamed/removed in "
+                "drcode; update bench.env_setup.project_settings"
+            )
+        if loaded[key] != value:
+            raise EnvSetupError(
+                f"settings pin '{key}'={value!r} round-trips as "
+                f"{loaded[key]!r} through drcode's ProjectSettingsStore "
+                "(a drcode migration changed the value's shape?)"
+            )
 
 
 class EnvSetupError(RuntimeError):
@@ -389,9 +494,12 @@ def prepare_run(
     - generates `config-home/drcode/models.json` from the combo's providers;
     - writes `workspace/.drcode/drcode.json` (the per-role `models`
       selection + non-provider settings) and `workspace/.drcode/settings.json`
-      (`stall_nudge="never"`, `completed_retention="never"`,
-      `task_finalization="testing"` — or `"testing_commit"` with a LOCAL
-      bare remote inside the run tree, never GitHub);
+      — the FULL pinned `ProjectSettings` payload (`project_settings()`):
+      `stall_nudge="never"`, `completed_retention="never"`, isolation off,
+      GitHub sync off, and `verification`/`git_policy` expanded from
+      `task_finalization` (`"testing"` — the tester verifies without
+      committing; `"testing_commit"` — the tester commits and pushes to a
+      LOCAL bare remote inside the run tree, never GitHub);
     - git-init's the workspace with a seed commit.
 
     `task_finalization` must be `"testing"` or `"testing_commit"`.
@@ -468,19 +576,18 @@ def prepare_run(
         project["compaction_threshold"] = coding_model.compaction_threshold
     project_config = _write_json(workspace / PROJECT_STATE_DIRNAME / "drcode.json", project)
 
-    # 4. project settings: no watchdog, no retention cleanup, testing
-    #    finalization — pushes go to a LOCAL bare remote inside the run
-    #    tree only, never to GitHub (§13).
+    # 4. project settings: the FULL pinned configuration (see the pins
+    #    block comment above `project_settings`) — no watchdog, no
+    #    retention cleanup, no isolation, no GitHub sync; verification +
+    #    per-role git policies expanded from `task_finalization`. Pushes
+    #    go to a LOCAL bare remote inside the run tree only, never to
+    #    GitHub (§13).
     remote: Path | None = None
     if task_finalization == "testing_commit":
         remote = run_dir / "remote.git"
     settings_file = _write_json(
         workspace / PROJECT_STATE_DIRNAME / "settings.json",
-        {
-            "task_finalization": task_finalization,
-            "stall_nudge": "never",
-            "completed_retention": "never",
-        },
+        project_settings(task_finalization),
     )
 
     # 5. git: seed commit; bare remote (created before the workspace repo
@@ -604,6 +711,11 @@ def verify_resolution(
                     "entry must reach the role)"
                 )
             resolved[role] = f"{provider_name}/{eff.model}"
+
+    # The generated settings.json must round-trip through drcode's own
+    # ProjectSettingsStore: a key renamed/migrated in drcode fails HERE,
+    # loudly, instead of silently un-pinning the run's configuration.
+    check_settings_roundtrip(workspace)
     return resolved
 
 
