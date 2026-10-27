@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 from bench.runner import (
+    Job,
     JobOutcome,
     Runner,
     RunnerError,
@@ -283,6 +285,71 @@ def test_run_sweep_generates_report(bench_env, tmp_path, monkeypatch) -> None:
     text = report_path.read_text(encoding="utf-8")
     assert "# drcode-bench report" in text
     assert "combo-a" in text and "s1_x" in text
+
+
+# -- console log: completion order + durations --------------------------------------
+
+
+def test_done_log_follows_completion_order(bench_env, tmp_path, monkeypatch, capsys) -> None:
+    """With parallel > 1 the `[done]` lines must appear in COMPLETION order,
+    not submission order: a slow job submitted first must report last, even
+    though fast jobs submitted after it finish long before it does."""
+    matrix, _ = bench_env
+    durations = {"s1_x": 1.0, "s2_y": 0.2}
+    # parallel=2: worker slots take s1_x/rep0 (1.0 s) and s2_y/rep0 (0.2 s);
+    # the third job (s2_y/rep1) starts when the fast one frees its slot at
+    # ~0.2 s and finishes at ~0.4 s — long before the first job at ~1.0 s.
+    # Completion order (s2_y0, s2_y1, s1_x0) differs from submission order
+    # (s1_x0, s2_y0, s2_y1).
+    jobs = [
+        Job(scenario=sid, combo="combo-a", repeat=rep, timeout_seconds=10)
+        for sid, rep in (("s1_x", 0), ("s2_y", 0), ("s2_y", 1))
+    ]
+
+    def fake_attempt(self, job: Job, run_dir: Path):
+        time.sleep(durations[job.scenario])
+        return 0, {"ok": True, "reason": "settled"}, durations[job.scenario]
+
+    monkeypatch.setattr(Runner, "_attempt", fake_attempt)
+    runner = Runner(matrix, tmp_path / "runs", parallel=2, verbose=True)
+    outcomes = runner.run(jobs)
+
+    done_lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("[done]")
+    ]
+    assert len(done_lines) == 3
+    completion_order = [line.split()[1] for line in done_lines]
+    assert completion_order == ["s2_y", "s2_y", "s1_x"]
+
+    # But outcomes and the summary keep the stable submission order.
+    assert [(o.scenario, o.repeat) for o in outcomes] == [(j.scenario, j.repeat) for j in jobs]
+    summary = json.loads((tmp_path / "runs" / "runner-summary.json").read_text(encoding="utf-8"))
+    assert [(j["scenario"], j["repeat"]) for j in summary["jobs"]] == [
+        (j.scenario, j.repeat) for j in jobs
+    ]
+    assert all(j["elapsed_seconds"] is not None for j in summary["jobs"])
+
+
+def test_done_log_includes_job_duration(bench_env, tmp_path, monkeypatch, capsys) -> None:
+    """Each `[done]` line carries the job's wall-clock duration, formatted
+    by format_duration, and the outcome records it for the summary."""
+    matrix, _ = bench_env
+    job = Job(scenario="s1_x", combo="combo-a", repeat=0, timeout_seconds=10)
+
+    def fake_attempt(self, job: Job, run_dir: Path):
+        # The duration must be REAL wall time: run_job measures the job
+        # itself (all attempts + backoff), it does not trust _attempt.
+        time.sleep(1.05)
+        return 0, {"ok": True, "reason": "settled"}, 1.05
+
+    monkeypatch.setattr(Runner, "_attempt", fake_attempt)
+    runner = Runner(matrix, tmp_path / "runs", parallel=1, verbose=True)
+    (outcome,) = runner.run([job])
+
+    out = capsys.readouterr().out
+    done_line = next(line for line in out.splitlines() if line.startswith("[done]"))
+    assert "in 1 s" in done_line
+    assert outcome.elapsed_seconds == pytest.approx(1.05, abs=0.1)
 
 
 def test_runs_dir_is_gitignored() -> None:

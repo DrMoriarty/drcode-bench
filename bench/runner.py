@@ -33,7 +33,7 @@ import re
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -154,6 +154,9 @@ class JobOutcome:
     infra_attempts: int = 0  # extra attempts beyond the first
     infra_errors: list[str] = field(default_factory=list)
     content_failure: bool = False
+    # Total wall-clock time of the job (all attempts + infra backoff), set
+    # when run_job finishes; None only for outcomes constructed ad hoc.
+    elapsed_seconds: float | None = None
 
     @property
     def final_run_dir(self) -> str | None:
@@ -338,6 +341,7 @@ class Runner:
 
     def run_job(self, job: Job) -> JobOutcome:
         outcome = JobOutcome(scenario=job.scenario, combo=job.combo, repeat=job.repeat)
+        started = time.monotonic()
         stamp = time.strftime("%Y%m%d-%H%M%S")
         for attempt in range(self.max_infra_retries + 1):
             run_dir = self.runs_dir / job.run_id(stamp, attempt)
@@ -380,6 +384,7 @@ class Runner:
             )
         if outcome.ok is None and not outcome.reason:
             outcome.reason = "no verdict produced"
+        outcome.elapsed_seconds = time.monotonic() - started
         return outcome
 
     # -- the sweep --------------------------------------------------------------
@@ -387,22 +392,37 @@ class Runner:
     def run(self, jobs: list[Job]) -> list[JobOutcome]:
         warn_missing_api_keys(self.matrix_path)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
-        outcomes: list[JobOutcome] = []
         started = time.monotonic()
         with ThreadPoolExecutor(max_workers=self.parallel) as pool:
             futures = [(job, pool.submit(self.run_job, job)) for job in jobs]
-            for job, future in futures:
+            slot = {future: index for index, (_, future) in enumerate(futures)}
+            # Report in COMPLETION order (as_completed), not submission
+            # order: a `[done]` line must appear the moment its job
+            # finishes, otherwise the console log misrepresents when jobs
+            # actually ended (a fast job submitted early would only be
+            # reported after every earlier-submitted job). The returned
+            # list and runner-summary.json keep the submission order.
+            by_index: dict[int, JobOutcome] = {}
+            for future in as_completed(future for _, future in futures):
+                index = slot[future]
+                job = futures[index][0]
                 outcome = future.result()
-                outcomes.append(outcome)
+                by_index[index] = outcome
                 status = (
                     "OK"
                     if outcome.ok
                     else ("DATA-POINT (failed)" if outcome.ok is False else "INFRA-UNRESOLVED")
                 )
+                duration = (
+                    f" in {format_duration(outcome.elapsed_seconds)}"
+                    if outcome.elapsed_seconds is not None
+                    else ""
+                )
                 self._log(
-                    f"[done] {job.scenario} × {job.combo} × rep{job.repeat}: {status}"
+                    f"[done] {job.scenario} × {job.combo} × rep{job.repeat}: {status}{duration}"
                     + (f" — {outcome.reason}" if outcome.reason and not outcome.ok else "")
                 )
+        outcomes = [by_index[index] for index in range(len(futures))]
         self._log(f"[sweep] {len(jobs)} job(s) in {format_duration(time.monotonic() - started)}")
         self.write_summary(outcomes)
         return outcomes
