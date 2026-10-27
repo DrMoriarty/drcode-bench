@@ -128,6 +128,11 @@ class RunReport:
     proxy_log: str | None = None
     proxy_base: str | None = None
     proxy_faults: dict[str, int] = field(default_factory=dict)
+    # §9 stall watchdog: config + trigger counters when the mode was
+    # active — the run is MARKED so its measurements (provider tail
+    # latency masked by the proxy's transparent retries) are never mixed
+    # with clean runs. None = the watchdog was off for this run.
+    proxy_watchdog: dict[str, Any] | None = None
     tasks: list[dict[str, Any]] = field(default_factory=list)
     # User simulator (§6): how many interventions it made and which
     # scenario failures it recorded (report §10 must be able to tell
@@ -270,6 +275,7 @@ async def run_benchmark(
         proxy = FaultProxy(
             upstreams,
             proxy_spec.faults if proxy_spec else (),
+            watchdog=proxy_spec.watchdog if proxy_spec else None,
             log_path=run_dir / "proxy_log.jsonl",
             log_bodies=bool(proxy_spec.log_bodies) if proxy_spec else False,
         )
@@ -290,6 +296,7 @@ async def run_benchmark(
         if proxy is not None:
             await proxy.stop()
             report.proxy_faults = proxy.engine.fired_summary()
+            report.proxy_watchdog = proxy.watchdog_summary()
 
 
 async def _run_with_optional_proxy(
@@ -529,6 +536,13 @@ def main(argv: list[str] | None = None) -> int:
     if report.proxy_base:
         faults = ", ".join(f"{k}×{v}" for k, v in report.proxy_faults.items())
         print(f"proxy:    {report.proxy_base} (faults: {faults or 'none'})")
+    if report.proxy_watchdog:
+        wd = report.proxy_watchdog
+        print(
+            f"          stall watchdog: >{wd['stall_timeout_s']}s silence, "
+            f"retries={wd['retries']} (triggers={wd['triggers']}, saved={wd['saved']}, "
+            f"exhausted={wd['exhausted']}) — latencies may include masked stalls"
+        )
     if report.resolved_context_tokens:
         ctx = ", ".join(
             f"{role}={n} ({report.resolved_context_sources.get(role, 'catalog')})"

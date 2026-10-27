@@ -134,6 +134,51 @@ MODELS = (
 )
 
 
+# -- stall rules for the §9 stall-watchdog tests (bench/proxy.py) -----------------
+# A rule makes /chat/completions requests for one model go SILENT — no bytes —
+# for `stall_s` seconds, either before anything is written (mode="pre": the
+# proxy's watchdog aborts during the header wait) or after the response head
+# and the first body piece (mode="mid": the watchdog aborts mid-relay).
+# `requests` limits how many requests the rule applies to (None = every one),
+# counted per model: a {"requests": 1, "stall_s": 5} rule stalls the FIRST
+# request only, so a proxy-side watchdog retry arrives at an instantly
+# responding upstream. The sleeping handler polls the socket every 50 ms and
+# gives up as soon as the client (the aborting proxy) disconnects.
+STALL_RULES: dict[str, dict] = {}
+_stall_seen: dict[str, int] = {}
+
+
+def clear_stall_rules() -> None:
+    """Reset the module-level stall state (tests start a fresh gateway
+    per case, but the module dict outlives individual servers)."""
+    STALL_RULES.clear()
+    _stall_seen.clear()
+
+
+def _stall_rule_for(model: str) -> dict | None:
+    """The stall rule for this request (the request is counted even when
+    its rule's `requests` budget is already spent), or None."""
+    rule = STALL_RULES.get(model)
+    if rule is None:
+        return None
+    _stall_seen[model] = _stall_seen.get(model, 0) + 1
+    limit = rule.get("requests")
+    if limit is not None and _stall_seen[model] > int(limit):
+        return None
+    return rule
+
+
+async def _stall_silence(seconds: float, writer: asyncio.StreamWriter) -> bool:
+    """Stay silent for `seconds`; True = the client disconnected meanwhile
+    (the proxy's watchdog abort closed the socket) — give up."""
+    deadline = asyncio.get_event_loop().time() + seconds
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+        if writer.is_closing():
+            return True
+    return writer.is_closing()
+
+
 def _coder_script(messages: list[dict]) -> dict:
     """Coder: one run_bash fixing the seed, then a closing text."""
     if any(m.get("role") == "tool" for m in messages):
@@ -1209,16 +1254,44 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
             head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
         elif path.endswith("/chat/completions"):
             body = json.loads(body_raw or b"{}")
+            rule = _stall_rule_for(str(body.get("model") or ""))
             if body.get("stream"):
                 head = (
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                     b"Connection: close\r\n\r\n"
                 )
+                if rule and rule.get("mode") == "mid":
+                    # Headers + the FIRST SSE chunk, then silence: the
+                    # watchdog abort lands mid-relay (not retryable).
+                    stream = _chat_stream(body)
+                    writer.write(head + stream.split(b"\n\n")[0] + b"\n\n")
+                    await writer.drain()
+                    if await _stall_silence(float(rule["stall_s"]), writer):
+                        return
+                    writer.write(stream)
+                    await writer.drain()
+                    return
+                if rule and await _stall_silence(float(rule["stall_s"]), writer):
+                    return
                 writer.write(head + _chat_stream(body))
                 await writer.drain()
                 return
             payload = _chat_json(body)
             head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            if rule and rule.get("mode") == "mid":
+                # Headers + a partial JSON body (the promised
+                # Content-Length is unmet), then silence.
+                writer.write(
+                    head + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload[:10]
+                )
+                await writer.drain()
+                if await _stall_silence(float(rule["stall_s"]), writer):
+                    return
+                writer.write(payload[10:])
+                await writer.drain()
+                return
+            if rule and await _stall_silence(float(rule["stall_s"]), writer):
+                return
         else:
             payload = b'{"error": "not found"}'
             head = (

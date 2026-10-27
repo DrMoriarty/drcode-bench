@@ -1103,6 +1103,43 @@ def read_proxy_log_entries(run_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _watchdog_aggregate(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Stall-watchdog events (§9, `[proxy.watchdog]`) over the proxy log:
+    aborts of silent upstream attempts, the transparent retries that
+    followed, and their outcomes. Present when the watchdog FIRED at
+    least once (an active-but-silent watchdog is marked in result.json
+    via `result.proxy_watchdog`, not here)."""
+    triggers = retries = saved = exhausted = 0
+    phases: dict[str, int] = {}
+    for rec in entries:
+        wd = rec.get("watchdog")
+        if not isinstance(wd, dict):
+            continue
+        triggers += len(wd.get("events") or [])
+        retries += max(int(wd.get("attempts", 1)) - 1, 0)
+        if wd.get("saved"):
+            saved += 1
+        elif wd.get("events"):
+            exhausted += 1
+        for ev in wd.get("events") or []:
+            phase = str(ev.get("phase") or "unknown")
+            phases[phase] = phases.get(phase, 0) + 1
+    if not triggers and not retries:
+        return None
+    return {
+        "triggers": triggers,
+        "retries": retries,
+        "saved": saved,
+        "exhausted": exhausted,
+        "abort_phases": phases,
+        "remark": (
+            "proxy-side stall watchdog was active: aborted silences are masked tail "
+            "latency — do not mix with clean measurements (result.proxy_watchdog "
+            "marks the run even when nothing fired)"
+        ),
+    }
+
+
 def analyze_proxy(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Aggregate `proxy_log.jsonl` (§9/§10): per-model request counts and
     latency p50/p95 (the proxy measures the SAME wall-time the recorder
@@ -1144,6 +1181,7 @@ def analyze_proxy(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
         "errors": errors,
         "faults_injected": sum(faults.values()),
         "faults": faults,
+        "watchdog": _watchdog_aggregate(entries),
         "per_model": per_model,
         "latency_ms_p50": _percentile(clean_latencies, 50),
         "latency_ms_p95": _percentile(clean_latencies, 95),
@@ -1608,6 +1646,9 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             "started_at": result.get("started_at"),
             "finished_at": result.get("finished_at"),
             "resolved_roles": result.get("resolved_roles") or {},
+            # §9 stall watchdog: config + counters when the mode was
+            # active for this run (None = clean run, no masking).
+            "proxy_watchdog": result.get("proxy_watchdog"),
         },
         "wall_time_s": {
             "settle": result.get("settle_elapsed_s"),

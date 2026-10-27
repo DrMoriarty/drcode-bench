@@ -46,7 +46,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .proxy import ProxyError, parse_faults
+from .proxy import ProxyError, WatchdogSpec, parse_faults, parse_watchdog
 
 # Plan §7 rule: research tasks skip the tester entirely (they end with
 # mark_done and never get a verification label). They are queueable, but a
@@ -134,11 +134,23 @@ class ProxySpec:
         kind = "http_429"           # http_429 | drop | delay
         nth = 1                     # 1-based over the requests matching scope
         scope = "chat/completions"  # path substring, "" = every request
+
+        # Optional stall watchdog (§9, opt-in): an upstream silent for
+        # `stall_timeout_s` (no headers/body/SSE bytes) is aborted and
+        # retried once by the proxy, transparently for drcode. MASKS real
+        # provider tail latency — enable only for scenarios where the
+        # tail is infrastructure noise (e.g. s4_compaction_tester,
+        # s8_fix_loop); the run is then marked in result.json
+        # (`proxy_watchdog`) and metrics.json (`proxy.watchdog`).
+        [proxy.watchdog]
+        stall_timeout_s = 45        # seconds of upstream silence per attempt
+        retries = 1                 # proxy-side retries per request
     """
 
     enabled: bool = True
     log_bodies: bool = False
     faults: tuple = ()  # tuple[FaultSpec, ...] (bench.proxy.FaultSpec)
+    watchdog: WatchdogSpec | None = None  # opt-in stall watchdog (§9)
 
 
 @dataclass(frozen=True)
@@ -310,7 +322,8 @@ def _parse_match(raw: object, idx: int) -> str | list[str] | tuple[str, ...] | N
 def _parse_proxy(data: dict) -> ProxySpec | None:
     """The optional `[proxy]` section (§9): fault-injection proxy for this
     scenario. Faults are validated here — an unknown fault kind must fail
-    the scenario load, not silently pass every request through."""
+    the scenario load, not silently pass every request through. Same for
+    the optional `[proxy.watchdog]` table (stall watchdog)."""
     raw = data.get("proxy")
     if not raw:
         return None
@@ -318,12 +331,14 @@ def _parse_proxy(data: dict) -> ProxySpec | None:
         raise ScenarioError("[proxy] must be a table")
     try:
         faults = parse_faults(raw.get("faults") or [])
+        watchdog = parse_watchdog(raw.get("watchdog"))
     except ProxyError as e:
         raise ScenarioError(f"[proxy]: {e}") from None
     spec = ProxySpec(
         enabled=bool(raw.get("enabled", True)),
         log_bodies=bool(raw.get("log_bodies", False)),
         faults=faults,
+        watchdog=watchdog,
     )
     if spec.faults and not spec.enabled:
         raise ScenarioError("[proxy]: faults defined but enabled = false")

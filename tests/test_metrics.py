@@ -14,6 +14,7 @@ import pytest
 from bench.metrics import (
     COMPACTION_SUMMARY_PREFIX,
     MetricsError,
+    analyze_proxy,
     analyze_task,
     classify_event,
     extract_run_metrics,
@@ -130,6 +131,55 @@ def make_task() -> dict:
         "queue_seq": 0,
         "github_issue": None,
     }
+
+
+def test_analyze_proxy_watchdog_aggregate() -> None:
+    """§9 stall watchdog: abort events from proxy_log.jsonl aggregate
+    into metrics["proxy"]["watchdog"]; a log without watchdog events
+    yields None there (clean run)."""
+    entries = [
+        {  # aborted once, retry SAVED the request (attempts 2, saved)
+            "model": "m",
+            "status": 200,
+            "latency_ms": 3100,
+            "watchdog": {
+                "stall_timeout_s": 0.3,
+                "retries": 1,
+                "attempts": 2,
+                "saved": True,
+                "events": [{"attempt": 1, "phase": "headers", "stalled_s": 0.3}],
+            },
+        },
+        {  # retry budget exhausted → 502
+            "model": "m",
+            "status": 502,
+            "error": "stall watchdog gave up",
+            "watchdog": {
+                "stall_timeout_s": 0.3,
+                "retries": 1,
+                "attempts": 2,
+                "saved": False,
+                "events": [
+                    {"attempt": 1, "phase": "headers", "stalled_s": 0.3},
+                    {"attempt": 2, "phase": "headers", "stalled_s": 0.3},
+                ],
+            },
+        },
+        {"model": "m", "status": 200, "latency_ms": 500},
+    ]
+    result = analyze_proxy(entries)
+    assert result is not None
+    wd = result["watchdog"]
+    assert wd is not None
+    assert wd["triggers"] == 3
+    assert wd["retries"] == 2
+    assert wd["saved"] == 1
+    assert wd["exhausted"] == 1
+    assert wd["abort_phases"] == {"headers": 3}
+
+    clean = analyze_proxy([{"model": "m", "status": 200, "latency_ms": 100}])
+    assert clean is not None
+    assert clean["watchdog"] is None
 
 
 def test_prefix_matches_drcode_source() -> None:

@@ -11,6 +11,7 @@ it would prove nothing).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -21,9 +22,12 @@ from bench.proxy import (
     FaultProxy,
     FaultSpec,
     ProxyError,
+    WatchdogSpec,
     apply_proxy_base,
     parse_faults,
+    parse_watchdog,
 )
+from tests.fake_gateway import STALL_RULES, clear_stall_rules
 from tests.fake_gateway import start as start_gateway
 
 # --- fault engine ---------------------------------------------------------------
@@ -187,8 +191,6 @@ async def test_proxy_delay_fault(tmp_path: Path) -> None:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             body = {"model": "fake-coder", "messages": [{"role": "user", "content": "p"}]}
-            import time
-
             t0 = time.monotonic()
             r = await client.post(f"{base}/p/fake/chat/completions", json=body)
             elapsed = time.monotonic() - t0
@@ -198,6 +200,249 @@ async def test_proxy_delay_fault(tmp_path: Path) -> None:
         await proxy.stop()
         server.close()
         await server.wait_closed()
+
+
+# --- stall watchdog (§9, opt-in [proxy.watchdog]) -----------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_stall_rules():
+    clear_stall_rules()
+    yield
+    clear_stall_rules()
+
+
+def test_watchdog_spec_parsing_and_validation() -> None:
+    assert parse_watchdog(None) is None
+    wd = parse_watchdog({})
+    assert wd == WatchdogSpec(stall_timeout_s=45.0, retries=1)
+    assert parse_watchdog({"stall_timeout_s": 30, "retries": 2}) == WatchdogSpec(30.0, 2)
+    with pytest.raises(ProxyError):
+        parse_watchdog({"stall_timeout_s": 0})
+    with pytest.raises(ProxyError):
+        parse_watchdog({"retries": -1})
+    with pytest.raises(ProxyError):
+        WatchdogSpec(stall_timeout_s=-5)
+    # Config travels into result.json provenance.
+    assert WatchdogSpec(30.0, 2).as_dict() == {"stall_timeout_s": 30.0, "retries": 2}
+
+
+async def test_watchdog_aborts_stall_and_retry_succeeds(tmp_path: Path) -> None:
+    """The S4 tail case: the upstream goes silent long past the watchdog
+    budget on the FIRST attempt; the proxy aborts, retries ONCE — the
+    retry hits an instantly responding upstream and the client sees one
+    normal answer."""
+    server = await start_gateway(0)
+    gport = server.sockets[0].getsockname()[1]
+    STALL_RULES["fake-compaction"] = {"stall_s": 5.0, "requests": 1, "mode": "pre"}
+    log_path = tmp_path / "proxy_log.jsonl"
+    proxy = FaultProxy(
+        {"fake": f"http://127.0.0.1:{gport}/v1"},
+        watchdog=WatchdogSpec(stall_timeout_s=0.3, retries=1),
+        log_path=log_path,
+    )
+    base = await proxy.start()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            t0 = time.monotonic()
+            r = await client.post(
+                f"{base}/p/fake/chat/completions",
+                json={
+                    "model": "fake-compaction",
+                    "messages": [{"role": "user", "content": "p"}],
+                },
+            )
+            elapsed = time.monotonic() - t0
+            assert r.status_code == 200
+            payload = r.json()
+            assert payload["choices"][0]["message"]["content"]
+            assert elapsed < 5.0, "the stalled upstream must be aborted, not waited out"
+    finally:
+        await proxy.stop()
+        server.close()
+        await server.wait_closed()
+
+    from tests.fake_gateway import _stall_seen
+
+    assert _stall_seen["fake-compaction"] == 2, "exactly one proxy-side retry"
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(entries) == 1, "drcode sees ONE request — the retry stays inside the proxy"
+    wd = entries[0]["watchdog"]
+    assert wd["saved"] is True
+    assert wd["attempts"] == 2
+    assert [ev["phase"] for ev in wd["events"]] == ["headers"]
+    assert proxy.stats.watchdog_triggers == 1
+    assert proxy.stats.watchdog_retries == 1
+    assert proxy.stats.watchdog_saved == 1
+    assert proxy.stats.watchdog_exhausted == 0
+
+
+async def test_watchdog_exhausts_budget_and_reports_502(tmp_path: Path) -> None:
+    """An upstream silent on EVERY attempt: exactly one retry, then the
+    failure surfaces as-is (a clean 502) — no infinite retry loop."""
+    server = await start_gateway(0)
+    gport = server.sockets[0].getsockname()[1]
+    STALL_RULES["fake-coder"] = {"stall_s": 5.0, "requests": None, "mode": "pre"}
+    log_path = tmp_path / "proxy_log.jsonl"
+    proxy = FaultProxy(
+        {"fake": f"http://127.0.0.1:{gport}/v1"},
+        watchdog=WatchdogSpec(stall_timeout_s=0.3, retries=1),
+        log_path=log_path,
+    )
+    base = await proxy.start()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{base}/p/fake/chat/completions",
+                json={"model": "fake-coder", "messages": [{"role": "user", "content": "p"}]},
+            )
+            assert r.status_code == 502
+            assert r.json()["error"]["type"] == "bench_stall_watchdog"
+    finally:
+        await proxy.stop()
+        server.close()
+        await server.wait_closed()
+
+    from tests.fake_gateway import _stall_seen
+
+    assert _stall_seen["fake-coder"] == 2, "the initial attempt plus ONE retry, no more"
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    wd = entries[0]["watchdog"]
+    assert wd["saved"] is False
+    assert wd["attempts"] == 2
+    assert len(wd["events"]) == 2
+    assert entries[0]["status"] == 502
+    assert proxy.stats.watchdog_exhausted == 1
+
+
+async def test_watchdog_does_not_touch_a_flowing_stream(tmp_path: Path) -> None:
+    """Streaming responses with chunks arriving are never aborted — the
+    watchdog counts SILENCE, not total duration."""
+    server = await start_gateway(0)
+    gport = server.sockets[0].getsockname()[1]
+    log_path = tmp_path / "proxy_log.jsonl"
+    proxy = FaultProxy(
+        {"fake": f"http://127.0.0.1:{gport}/v1"},
+        watchdog=WatchdogSpec(stall_timeout_s=0.2, retries=1),
+        log_path=log_path,
+    )
+    base = await proxy.start()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{base}/p/fake/chat/completions",
+                json={
+                    "model": "fake-coder",
+                    "messages": [{"role": "user", "content": "p"}],
+                    "stream": True,
+                },
+            )
+            assert r.status_code == 200
+            assert "data: [DONE]" in r.text
+    finally:
+        await proxy.stop()
+        server.close()
+        await server.wait_closed()
+
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert all("watchdog" not in e for e in entries)
+    assert proxy.stats.watchdog_triggers == 0
+
+
+async def test_watchdog_midstream_abort_is_not_retryable(tmp_path: Path) -> None:
+    """A stall AFTER body bytes reached the client: the status line is
+    already on the wire, so no transparent retry is possible — the
+    watchdog logs the abort and the client sees the truncated stream
+    (the same break an unlatched `drop` produces)."""
+    server = await start_gateway(0)
+    gport = server.sockets[0].getsockname()[1]
+    STALL_RULES["fake-coder"] = {"stall_s": 5.0, "requests": None, "mode": "mid"}
+    log_path = tmp_path / "proxy_log.jsonl"
+    proxy = FaultProxy(
+        {"fake": f"http://127.0.0.1:{gport}/v1"},
+        watchdog=WatchdogSpec(stall_timeout_s=0.3, retries=1),
+        log_path=log_path,
+    )
+    base = await proxy.start()
+    try:
+        # httpx re-frames the relayed SSE as chunked; uvicorn closes the
+        # connection mid-body on the abort → an incomplete chunked read
+        # while the (partial) body is being consumed.
+        async with (
+            httpx.AsyncClient(timeout=15.0) as client,
+            client.stream(
+                "POST",
+                f"{base}/p/fake/chat/completions",
+                json={
+                    "model": "fake-coder",
+                    "messages": [{"role": "user", "content": "p"}],
+                    "stream": True,
+                },
+            ) as r,
+        ):
+            assert r.status_code == 200
+            received: list[str] = []
+            with pytest.raises(httpx.RemoteProtocolError):
+                async for chunk in r.aiter_text():
+                    received.append(chunk)
+            text = "".join(received)
+            assert "chatcmpl-fixture" in text, "the first chunk did reach the client"
+            assert "[DONE]" not in text, "the stream stays truncated"
+    finally:
+        await proxy.stop()
+        server.close()
+        await server.wait_closed()
+
+    from tests.fake_gateway import _stall_seen
+
+    assert _stall_seen["fake-coder"] == 1, "a mid-stream stall is never retried"
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    wd = entries[0]["watchdog"]
+    assert wd["saved"] is False
+    assert wd["attempts"] == 1
+    assert wd["events"][0]["phase"] == "mid-stream"
+    assert "not retryable" in entries[0]["error"]
+    assert proxy.stats.watchdog_exhausted == 1
+
+
+async def test_watchdog_retry_passes_through_the_fault_stream(tmp_path: Path) -> None:
+    """Determinism (§9): the watchdog retry is a real request through the
+    proxy stream — it ADVANCES the fault rules' nth counters (and can
+    fire one). Here the drop rule's nth=2 fires on the RETRY, before it
+    reaches the upstream (the gateway never sees a second request)."""
+    server = await start_gateway(0)
+    gport = server.sockets[0].getsockname()[1]
+    STALL_RULES["fake-coder"] = {"stall_s": 5.0, "requests": 1, "mode": "pre"}
+    log_path = tmp_path / "proxy_log.jsonl"
+    proxy = FaultProxy(
+        {"fake": f"http://127.0.0.1:{gport}/v1"},
+        (FaultSpec("drop", 2, "chat/completions"),),
+        watchdog=WatchdogSpec(stall_timeout_s=0.3, retries=1),
+        log_path=log_path,
+    )
+    base = await proxy.start()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            with pytest.raises(httpx.RemoteProtocolError):
+                await client.post(
+                    f"{base}/p/fake/chat/completions",
+                    json={"model": "fake-coder", "messages": [{"role": "user", "content": "p"}]},
+                )
+    finally:
+        await proxy.stop()
+        server.close()
+        await server.wait_closed()
+
+    from tests.fake_gateway import _stall_seen
+
+    assert _stall_seen["fake-coder"] == 1, "the retry was faulted before the upstream"
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert entries[0]["fault"]["kind"] == "drop"
+    assert entries[0]["fault"]["on_watchdog_retry"] is True
+    wd = entries[0]["watchdog"]
+    assert wd["saved"] is False
+    assert wd["attempts"] == 2
+    assert [ev["phase"] for ev in wd["events"]] == ["headers"]
 
 
 # --- catalog rewrite ---------------------------------------------------------------

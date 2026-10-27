@@ -28,6 +28,42 @@ layer exactly what drcode's network layer must survive:
 - `delay`    — the request is stalled `delay_s` seconds before being
   forwarded (watchdog/timeout pressure, no retry by itself).
 
+Stall watchdog (opt-in, `[proxy.watchdog]`): provider tail latencies
+sometimes dominate whole runs — an upstream that sends NO bytes (no
+headers, no body, no SSE chunks) for tens of minutes while the openai
+SDK inside drcode only retries 429s (max_retries=2) and never retries
+connection-level breaks. When the watchdog is configured, the proxy
+itself aborts an upstream attempt that stays silent longer than
+`stall_timeout_s` and retries it ONCE, transparently for drcode: the
+client sees a single normal response. The second attempt is watched
+too; if it also stalls/dies, the client gets the failure as-is (a 502
+for an abort before any bytes were relayed, a truncated stream
+afterwards) — no infinite retry loop.
+
+Retryability boundary: the proxy buffers the upstream response HEADERS
+until the first body byte arrives, so a stall in the "headers" or
+"first-byte" phase leaves the client untouched and the attempt can be
+retried. A stall AFTER body bytes reached the client is NOT retryable
+(the status line and partial body are already on the wire) — the
+watchdog only logs the abort there, and the client sees the same
+mid-stream truncation an unlatched `drop` produces.
+
+Determinism (fault script × watchdog): a watchdog retry is a REAL
+upstream request through the proxy stream, so it passes through
+`FaultEngine.inspect` like any other request and ADVANCES the per-rule
+counters (and can itself fire a rule). A `[proxy.faults]` script's
+`nth` therefore counts ALL upstream forwards — client requests AND
+watchdog retries — which keeps the whole pattern (faults + retries) a
+pure function of the request stream, but means a script written for a
+watchdog-less stream shifts by the retries; scripts must be written
+against the watchdog-on stream when the watchdog is on.
+
+This MASKS real provider tail latency in the measurements (caveat of
+the feature): the mode is strictly opt-in, and every run with an
+active watchdog is marked in result.json (`proxy_watchdog`) and in
+metrics.json (`proxy.watchdog` + `result.proxy_watchdog`) so watchdog
+runs are never mixed with clean measurements.
+
 The proxy can also replace the §5 recording wrapper when that is
 inconvenient (e.g. a packaged binary run): its log carries per-request
 latency and upstream status for every agent's traffic. The main mode
@@ -159,6 +195,53 @@ def parse_faults(raw: list[dict[str, Any]] | None) -> tuple[FaultSpec, ...]:
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class WatchdogSpec:
+    """Opt-in stall watchdog for proxied requests (§9): when an upstream
+    attempt sends NO bytes for `stall_timeout_s` — neither response
+    headers, nor body, nor SSE chunks between chunks — the proxy aborts
+    it and retries the request ONCE (`retries`), transparently for the
+    client. The retry is watched the same way; an exhausted retry budget
+    surfaces the failure to the client as-is.
+
+    This deliberately MASKS provider tail latency (the aborted stall's
+    wall-time still lands in the request's latency, but the request is
+    SAVED) — hence opt-in per scenario and the run-level marking in
+    result.json / metrics.json.
+
+    Determinism: the retry passes through the fault script's request
+    stream (see the module docstring) — `nth` counters count watchdog
+    retries too."""
+
+    stall_timeout_s: float = 45.0
+    retries: int = 1
+
+    def __post_init__(self) -> None:
+        if self.stall_timeout_s <= 0:
+            raise ProxyError(f"watchdog stall_timeout_s must be > 0, got {self.stall_timeout_s}")
+        if int(self.retries) < 0:
+            raise ProxyError(f"watchdog retries must be >= 0, got {self.retries}")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"stall_timeout_s": self.stall_timeout_s, "retries": int(self.retries)}
+
+
+def parse_watchdog(raw: dict[str, Any] | None) -> WatchdogSpec | None:
+    """The optional `[proxy.watchdog]` TOML table (validated: a bad value
+    must fail the scenario load, not silently disable the watchdog)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProxyError("[proxy.watchdog] must be a table")
+    try:
+        return WatchdogSpec(
+            stall_timeout_s=float(raw.get("stall_timeout_s", 45.0)),
+            retries=int(raw.get("retries", 1)),
+        )
+    except (TypeError, ValueError) as e:
+        raise ProxyError(f"[proxy.watchdog]: {e}") from None
+
+
 class FaultEngine:
     """The deterministic fault matcher (§9): per-rule request counters
     over the requests that pass the proxy; a rule fires on the request
@@ -221,6 +304,12 @@ class ProxyStats:
     errors: int = 0
     started_at: float = 0.0
     stopped_at: float = 0.0
+    # Stall watchdog (§9, opt-in): aborts of silent upstream attempts,
+    # the transparent retries that followed and their outcomes.
+    watchdog_triggers: int = 0
+    watchdog_retries: int = 0
+    watchdog_saved: int = 0
+    watchdog_exhausted: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -232,12 +321,29 @@ class ProxyStats:
                 if self.started_at and self.stopped_at
                 else None
             ),
+            "watchdog_triggers": self.watchdog_triggers,
+            "watchdog_retries": self.watchdog_retries,
+            "watchdog_saved": self.watchdog_saved,
+            "watchdog_exhausted": self.watchdog_exhausted,
         }
+
+
+@dataclass
+class _Attempt:
+    """Outcome of ONE upstream attempt inside the watchdog loop."""
+
+    outcome: str  # ok | stalled | transport_error | relay_interrupted
+    relayed: bool = False  # response.start already sent to the client
+    phase: str = ""  # headers | first-byte | mid-stream (for stalls)
+    error: str = ""
+    status: int | None = None
+    stream: bool | None = None
+    response_bytes: int = 0
 
 
 class ProxyApp:
     """Raw ASGI application: prefix-routed forwarding proxy with fault
-    injection and JSONL logging.
+    injection, the optional stall watchdog and JSONL logging.
 
     One instance per run; the provider→upstream map comes from the
     combo's matrix providers, the fault script from the scenario. Logs
@@ -251,6 +357,7 @@ class ProxyApp:
         upstreams: dict[str, str],
         *,
         faults: tuple[FaultSpec, ...] = (),
+        watchdog: WatchdogSpec | None = None,
         log_path: Path | None = None,
         log_bodies: bool = False,
         client: httpx.AsyncClient | None = None,
@@ -259,6 +366,7 @@ class ProxyApp:
             raise ProxyError("proxy needs at least one provider → upstream mapping")
         self.upstreams = dict(upstreams)
         self.engine = FaultEngine(faults)
+        self.watchdog = watchdog
         self.log_bodies = log_bodies
         self.stats = ProxyStats()
         self.sink = JsonlSink(log_path) if log_path else None
@@ -339,42 +447,52 @@ class ProxyApp:
         if fault is not None:
             record["fault"] = fault.as_dict()
             self.stats.faults_injected += 1
-            if fault.kind == "http_429":
-                record.update(status=429, latency_ms=self._ms(t0))
-                await self._send_json(
-                    send,
-                    429,
-                    {
-                        "error": {
-                            "message": "rate limited by fault injection",
-                            "type": "bench_fault_injection",
-                        }
-                    },
-                    extra_headers=[(b"retry-after", b"1")],
-                )
+            if await self._handle_fault(fault, record, send, t0):
                 self._log(record)
                 return
-            if fault.kind == "drop":
-                # Truncated response: headers promise more than is sent,
-                # then the connection dies — a transport break for the
-                # client (APIConnectionError), not an HTTP error status.
-                record.update(
-                    status=200,
-                    error="connection dropped by fault injection",
-                    latency_ms=self._ms(t0),
-                )
-                self.stats.errors += 1
-                await self._send_truncated(send)
-                self._log(record)
-                return
-            if fault.kind == "delay":
-                record["fault"] = fault.as_dict() | {"delayed_s": fault.delay_s}
-                await asyncio.sleep(fault.delay_s)
-                # fall through to the normal forwarding
+            # delay: fall through to the normal forwarding
 
         await self._forward(scope, method, upstream_url, body, record, send, t0)
 
     # -- forwarding -------------------------------------------------------
+
+    async def _handle_fault(
+        self, fault: FaultSpec, record: dict[str, Any], send, t0: float
+    ) -> bool:
+        """Inject one fault for this attempt. True = the client was
+        answered (429 / truncated drop) and the request is over; False =
+        the fault was transparent (delay) and forwarding must proceed.
+        Does NOT log — the caller owns the record's lifecycle."""
+        if fault.kind == "http_429":
+            record.update(status=429, latency_ms=self._ms(t0))
+            await self._send_json(
+                send,
+                429,
+                {
+                    "error": {
+                        "message": "rate limited by fault injection",
+                        "type": "bench_fault_injection",
+                    }
+                },
+                extra_headers=[(b"retry-after", b"1")],
+            )
+            return True
+        if fault.kind == "drop":
+            # Truncated response: headers promise more than is sent,
+            # then the connection dies — a transport break for the
+            # client (APIConnectionError), not an HTTP error status.
+            record.update(
+                status=200,
+                error="connection dropped by fault injection",
+                latency_ms=self._ms(t0),
+            )
+            self.stats.errors += 1
+            await self._send_truncated(send)
+            return True
+        # delay
+        record["fault"] = fault.as_dict() | {"delayed_s": fault.delay_s}
+        await asyncio.sleep(fault.delay_s)
+        return False
 
     async def _forward(
         self,
@@ -386,23 +504,163 @@ class ProxyApp:
         send,
         t0: float,
     ) -> None:
+        """Relay one client request to the upstream, under the stall
+        watchdog when configured: an attempt silent for more than
+        `stall_timeout_s` is aborted and (while nothing has reached the
+        client yet) retried once — see the module docstring for the
+        retryability boundary and the fault-stream determinism."""
+        wspec = self.watchdog
+        stall = wspec.stall_timeout_s if wspec else None
+        retries_left = wspec.retries if wspec else 0
+        events: list[dict[str, Any]] = []
+        attempt = 0
+        path = scope["path"]
+
+        while True:
+            attempt += 1
+            res = await self._forward_attempt(scope, method, upstream_url, body, send, stall)
+
+            if res.outcome == "stalled":
+                self.stats.watchdog_triggers += 1
+                events.append({"attempt": attempt, "phase": res.phase, "stalled_s": stall})
+                if not res.relayed and retries_left > 0:
+                    retries_left -= 1
+                    self.stats.watchdog_retries += 1
+                    # The retry is a real upstream request through the
+                    # proxy stream: it re-enters the fault script (its
+                    # counters advance; a rule may fire on it).
+                    fault = self.engine.inspect(path)
+                    if fault is not None:
+                        record["fault"] = fault.as_dict() | {"on_watchdog_retry": True}
+                        self.stats.faults_injected += 1
+                        if await self._handle_fault(fault, record, send, t0):
+                            self._attach_watchdog(record, wspec, attempt + 1, events, saved=False)
+                            self._log(record)
+                            return
+                    continue
+                if res.relayed:
+                    # Mid-stream abort: the status line (and part of the
+                    # body) are already on the wire — a transparent retry
+                    # is impossible; the client sees the truncation, the
+                    # same break an unlatched `drop` produces.
+                    record["status"] = res.status
+                    record["stream"] = res.stream
+                    record["error"] = (
+                        f"stall watchdog aborted the upstream after {stall}s of silence "
+                        f"({res.phase}) — already relaying, not retryable"
+                    )
+                    self.stats.errors += 1
+                    self.stats.watchdog_exhausted += 1
+                    self._attach_watchdog(record, wspec, attempt, events, saved=False)
+                    record["latency_ms"] = self._ms(t0)
+                    record["response_bytes"] = res.response_bytes
+                    self._log(record)
+                    return
+                # Nothing reached the client and the retry budget is out:
+                # surface the abort as a clean 502 (no upstream status to
+                # relay "as is" — the upstream never answered).
+                record["status"] = 502
+                record["error"] = (
+                    f"upstream sent no bytes for {stall}s — stall watchdog gave up "
+                    f"after {attempt} attempt(s)"
+                )
+                self.stats.errors += 1
+                self.stats.watchdog_exhausted += 1
+                self._attach_watchdog(record, wspec, attempt, events, saved=False)
+                record["latency_ms"] = self._ms(t0)
+                await self._send_json(
+                    send,
+                    502,
+                    {"error": {"message": record["error"], "type": "bench_stall_watchdog"}},
+                )
+                self._log(record)
+                return
+
+            if res.outcome == "transport_error":
+                # Upstream transport failure is logged and surfaced as
+                # 502 — a fault script produces drops, an unreachable
+                # upstream is an infrastructure problem the run must SEE
+                # as one. After a watchdog abort the same 502 carries the
+                # retry history in record["watchdog"].
+                record["status"] = 502
+                record["error"] = res.error
+                self.stats.errors += 1
+                self._attach_watchdog(record, wspec, attempt, events, saved=False)
+                record["latency_ms"] = self._ms(t0)
+                await self._send_json(send, 502, {"error": f"upstream unreachable: {res.error}"})
+                self._log(record)
+                return
+
+            if res.outcome == "relay_interrupted":
+                # Died mid-relay: the client sees a truncated response
+                # (the same break a `drop` fault produces) — log and give
+                # up; the ASGI connection is closed by uvicorn.
+                record["error"] = res.error
+                self.stats.errors += 1
+            record["status"] = res.status
+            record["stream"] = res.stream
+            if events:
+                self._attach_watchdog(record, wspec, attempt, events, saved=res.outcome == "ok")
+                if res.outcome == "ok":
+                    self.stats.watchdog_saved += 1
+            record["latency_ms"] = self._ms(t0)
+            record["response_bytes"] = res.response_bytes
+            self._log(record)
+            return
+
+    def _attach_watchdog(
+        self,
+        record: dict[str, Any],
+        wspec: WatchdogSpec | None,
+        attempt: int,
+        events: list[dict[str, Any]],
+        *,
+        saved: bool,
+    ) -> None:
+        """Watchdog provenance into the request's log line: the config,
+        how many attempts were made, whether a retry SAVED the request,
+        and every abort (phase + silence duration) — aggregated into
+        metrics.json["proxy"]["watchdog"] (bench.metrics.analyze_proxy)."""
+        record["watchdog"] = {
+            **(wspec.as_dict() if wspec else {}),
+            "attempts": attempt,
+            "saved": saved,
+            "events": events,
+        }
+
+    async def _forward_attempt(
+        self,
+        scope: dict,
+        method: str,
+        upstream_url: str,
+        body: bytes,
+        send,
+        stall_timeout: float | None,
+    ) -> _Attempt:
+        """One upstream attempt: send the request, relay the response.
+        With `stall_timeout` set, every wait for upstream bytes (the
+        response headers, then each body chunk) is bounded by the
+        watchdog; an abort before the first body byte reached the client
+        (relayed=False) can be retried transparently by the caller."""
         headers = self._upstream_headers(scope)
         req = self._client.build_request(
             method, upstream_url, content=body or None, headers=headers
         )
         try:
-            resp = await self._client.send(req, stream=True)
+            if stall_timeout is None:
+                resp = await self._client.send(req, stream=True)
+            else:
+                try:
+                    resp = await asyncio.wait_for(
+                        self._client.send(req, stream=True), timeout=stall_timeout
+                    )
+                except TimeoutError:
+                    # wait_for cancelled the send: httpcore discards the
+                    # in-flight exchange (and its connection) on
+                    # cancellation — no response object to close here.
+                    return _Attempt("stalled", phase="headers")
         except httpx.HTTPError as e:
-            # Upstream transport failure is logged and surfaced as 502 —
-            # a fault script produces drops, an unreachable upstream is
-            # an infrastructure problem the run must SEE as one.
-            record.update(
-                status=502, error=f"upstream {type(e).__name__}: {e}", latency_ms=self._ms(t0)
-            )
-            self.stats.errors += 1
-            await self._send_json(send, 502, {"error": f"upstream unreachable: {e}"})
-            self._log(record)
-            return
+            return _Attempt("transport_error", error=f"upstream {type(e).__name__}: {e}")
 
         resp_headers = [
             (k.lower().encode("latin-1"), v.encode("latin-1"))
@@ -410,32 +668,65 @@ class ProxyApp:
             if k.lower() not in _HOP_BY_HOP
         ]
         stream = "text/event-stream" in resp.headers.get("content-type", "")
-        record["status"] = resp.status_code
-        record["stream"] = stream
-        await send(
-            {
-                "type": "http.response.start",
-                "status": resp.status_code,
-                "headers": resp_headers,
-            }
-        )
+        status = resp.status_code
         sent = 0
+        started = False
         try:
-            async for chunk in resp.aiter_raw():
+            aiter = resp.aiter_raw()
+            while True:
+                try:
+                    if stall_timeout is None:
+                        chunk = await aiter.__anext__()
+                    else:
+                        try:
+                            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=stall_timeout)
+                        except TimeoutError:
+                            return _Attempt(
+                                "stalled",
+                                relayed=started,
+                                phase="first-byte" if sent == 0 else "mid-stream",
+                                status=status,
+                                stream=stream,
+                                response_bytes=sent,
+                            )
+                except StopAsyncIteration:
+                    break
+                if not started:
+                    # Headers are held back until the first body byte
+                    # arrives: a stall before it leaves the client
+                    # untouched, so the attempt stays retryable.
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": status,
+                            "headers": resp_headers,
+                        }
+                    )
+                    started = True
                 sent += len(chunk)
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            if not started:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": status,
+                        "headers": resp_headers,
+                    }
+                )
             await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return _Attempt("ok", relayed=True, status=status, stream=stream, response_bytes=sent)
         except httpx.HTTPError as e:
-            # Died mid-relay: the client sees a truncated response (the
-            # same break a `drop` fault produces) — log and give up; the
-            # ASGI connection is closed by uvicorn on the early return.
-            record["error"] = f"relay interrupted: {type(e).__name__}: {e}"
-            self.stats.errors += 1
+            return _Attempt(
+                "relay_interrupted",
+                relayed=started,
+                phase="mid-stream",
+                error=f"relay interrupted: {type(e).__name__}: {e}",
+                status=status,
+                stream=stream,
+                response_bytes=sent,
+            )
         finally:
             await resp.aclose()
-        record["latency_ms"] = self._ms(t0)
-        record["response_bytes"] = sent
-        self._log(record)
 
     # -- helpers ----------------------------------------------------------
 
@@ -524,10 +815,13 @@ class FaultProxy:
         upstreams: dict[str, str],
         faults: tuple[FaultSpec, ...] = (),
         *,
+        watchdog: WatchdogSpec | None = None,
         log_path: Path | None = None,
         log_bodies: bool = False,
     ) -> None:
-        self.app = ProxyApp(upstreams, faults=faults, log_path=log_path, log_bodies=log_bodies)
+        self.app = ProxyApp(
+            upstreams, faults=faults, watchdog=watchdog, log_path=log_path, log_bodies=log_bodies
+        )
         self.base_url: str | None = None
         self._server: Any = None
         self._task: asyncio.Task | None = None
@@ -604,6 +898,25 @@ class FaultProxy:
     @property
     def engine(self) -> FaultEngine:
         return self.app.engine
+
+    @property
+    def watchdog(self) -> WatchdogSpec | None:
+        return self.app.watchdog
+
+    def watchdog_summary(self) -> dict[str, Any] | None:
+        """Watchdog provenance for result.json (§10): the configuration
+        (when the mode is active — the run must be marked even if the
+        watchdog never fired) plus the live counters after the run."""
+        if self.watchdog is None:
+            return None
+        s = self.app.stats
+        return {
+            **self.watchdog.as_dict(),
+            "triggers": s.watchdog_triggers,
+            "retries": s.watchdog_retries,
+            "saved": s.watchdog_saved,
+            "exhausted": s.watchdog_exhausted,
+        }
 
 
 def upstreams_for_providers(providers: dict[str, Any]) -> dict[str, str]:
