@@ -22,13 +22,16 @@
 # agent to create the file with write_file so it lands in
 # task.edited_files and the mandatory git_commit_docs commits it —
 # the stricter "git log -- docs/report.md non-empty" check of
-# checks.py relies on that.
+# checks.py relies on that. The docs artifact is also named in the
+# brief TITLE (same template as s10/s11): a computation-only title
+# reads as question-answering and models skip git_commit_docs
+# (observed in the 20261026 sweep: 3/9 commits before the fix).
 
 id = "s9_research_count"
 timeout = 30  # minutes — soft limit (§4: 30–60 min)
 
 [[briefs]]
-title = "Посчитайте выручку по data/orders.csv"
+title = "Посчитайте выручку по data/orders.csv и запишите результат в docs/report.md"
 kind = "research"
 text = """
 В репозитории лежит data/orders.csv — журнал заказов интернет-магазина
