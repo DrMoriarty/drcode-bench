@@ -83,6 +83,7 @@ import asyncio
 import contextlib
 import json
 import ssl
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -863,6 +864,18 @@ class FaultProxy:
             try:
                 # Any HTTP answer (even 404/401) proves the TLS layer works.
                 await self.app._client.get(base, timeout=10.0)
+            except httpx.TimeoutException as e:
+                # NOT fatal (this branch must precede the ConnectError one:
+                # ConnectTimeout is also a ConnectError). Corporate gateways
+                # may answer a bare preflight GET slowly/unstably (s7 runs
+                # 20261027-190327/try1-2: ReadTimeout / ConnectTimeout crashed
+                # the run subprocess here); per-request handling surfaces any
+                # real upstream outage as 502s the run can report.
+                print(
+                    f"warning: preflight GET to upstream {name!r} ({base}) timed out "
+                    f"({e!r}) — continuing; per-request 502s will show a real outage",
+                    file=sys.stderr,
+                )
             except httpx.ConnectError as e:
                 # Detection by exception type, not message: the truststore
                 # backend localizes the message (e.g. Russian macOS text).
