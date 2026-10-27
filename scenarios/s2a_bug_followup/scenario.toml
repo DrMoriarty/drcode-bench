@@ -50,6 +50,21 @@ pytest красный — падает test_pct (pct(50, 200) возвращае
 работа закончена.
 """
 
+[[clarification_answers]]
+# The follow-up lifts the round-1 "pct() untouchable" ban, but the coder
+# still sees the original brief's prohibition in the task prompt and may
+# legitimately ask how to proceed (observed in run 20261027-204649:
+# «...дефект вне объёма задачи... правки в pct() прямо запрещены брифом.
+# Как поступить?»). Any-of substrings over the question, case-insensitive —
+# the model paraphrases run to run (same rationale as S2b/S5).
+match = ["как поступить", "вне объёма", "запрещены брифом", "правки в pct"]
+answer = """
+Запрет «pct() не трогать» относился только к первому раунду задачи (починка
+div()) и больше не действует: вашим follow-up-сообщением пользователь расширил
+объём задачи, и исправление pct() теперь входит в её объём. Исправьте pct()
+(не хватало умножения на 100) и добейтесь полностью зелёного `pytest`.
+"""
+
 [settle]
 # Settle-criterion supplement (§4): the target task must end COMPLETED
 # with the tester's PASSED label — i.e. the follow-up round really passed.
