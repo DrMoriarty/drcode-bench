@@ -159,7 +159,8 @@ S11 (research V3), S12 (research V4), S13 (research V5, compound)**.
   start (mid-run pause или turn boundary), `COMPACTION_SUMMARY_PREFIX`
   в `messages`, исходный user-промпт дословно, задача COMPLETED/PASSED,
   pytest зелёный.
-- S4: сид — `data/listing.txt` на 25 000 строк, brief велит «проверь
+- S4: сид — `data/listing.txt` на 10 256 строк (~460 KB ≈ ~115K токенов,
+  ≈ 4–6 компакций тестера при капе 30000), brief велит «проверь
   полный листинг» (run_bash с жирным stdout); assertions checks.py:
   compaction-евент внутри testing-раунда, `tester_messages[-1]` содержит
   summary, вердикт выставлен.
