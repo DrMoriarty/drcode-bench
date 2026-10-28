@@ -77,7 +77,7 @@ max_context_tokens = 100000
 max_tokens = 8192
 
 [providers.fake.models.s3-coder]
-# The CATALOG context is big on purpose: the small limit (5000) must reach
+# The CATALOG context is big on purpose: the small limit (9000) must reach
 # the coding ROLE via the scenario's [context] section — not via the
 # catalog entry (§1.2, scenario → combo → catalog priority).
 max_context_tokens = 100000
@@ -171,7 +171,7 @@ COMBOS = {
     "s5_clarification": ("s5-coder", "s5-tester"),
     # S3/S4: the compaction lives on the CODER side (S3) / the TESTER side
     # (S4); the inflated gateway usage (fake_gateway._usage_for) trips the
-    # real gates of drcode (both on the scenario's [context] caps — 5000
+    # real gates of drcode (both on the scenario's [context] caps — 9000
     # for the S3 coding role, 30000 for the S4 tester role).
     "s3_compaction_coder": ("s3-coder", "fake-tester"),
     "s4_compaction_tester": ("s4-coder", "s4-tester"),
@@ -400,8 +400,8 @@ async def test_s3_compaction_coder_end_to_end(tmp_path: Path, monkeypatch, env_g
 
     # The harness recorded the effective per-role context limits (§1.2)
     # and WHERE each limit came from: the coding role runs on the
-    # scenario's [context] cap (5000, catalog entry 100000 untouched).
-    assert report.resolved_context_tokens["coding"] == 5000
+    # scenario's [context] cap (9000, catalog entry 100000 untouched).
+    assert report.resolved_context_tokens["coding"] == 9000
     assert report.resolved_context_sources["coding"] == "scenario"
     assert report.resolved_context_sources["tester"] == "catalog"
 
