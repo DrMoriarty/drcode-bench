@@ -600,6 +600,110 @@ def test_html_summary_scenario_clusters(tmp_path: Path) -> None:
     assert not any("scenario-start" in ln for ln in rows[5:])
 
 
+def test_summary_verdicts_markdown_only_html_dropped(tmp_path: Path) -> None:
+    """The Summary `verdicts` column stays in the markdown report but is
+    hidden in the HTML rendering — there the row background (verdict-ok/
+    fail/mixed, derived from the ORIGINAL verdict cells before the drop)
+    and the `pass rate` column already carry the outcome; the per-run
+    table keeps its own `verdict` column in both renderings."""
+    _write_run(tmp_path, make_metrics("r-m1", "s1", "c1"))  # mixed pair
+    mixed = make_metrics("r-m2", "s1", "c1")
+    mixed["verdict"] = "failed"
+    _write_run(tmp_path, mixed)
+    _write_run(tmp_path, make_metrics("r-ok", "s2", "c1"))
+    fail = make_metrics("r-fail", "s2", "c2")
+    fail["verdict"] = "failed"
+    _write_run(tmp_path, fail)
+    md_path = generate_report(tmp_path, html=True)
+    md = md_path.read_text(encoding="utf-8")
+    html = md_path.with_suffix(".html").read_text(encoding="utf-8")
+    # Markdown keeps the column.
+    summary = md.split("## Summary", 1)[1].split("## Scenario winners", 1)[0]
+    assert "| scenario | combo | runs | verdicts | pass rate |" in summary
+    assert "| failed, green |" in summary
+    # HTML summary drops it — but the runs table keeps its `verdict`.
+    assert "<th>verdicts</th>" not in html
+    assert "<th>verdict</th>" in html
+    # Row colouring survives the drop (computed before the column is cut):
+    # the three SUMMARY data rows carry all three verdict classes.
+    trs = [ln for ln in html.splitlines() if ln.startswith("<tr")]
+    summary_rows = trs[1:4]
+    assert 'class="verdict-mixed"' in summary_rows[0]
+    assert 'class="verdict-ok' in summary_rows[1]  # + scenario-start (new cluster)
+    assert 'class="verdict-fail' in summary_rows[2]
+
+
+def test_summary_compactions_column_removed(tmp_path: Path) -> None:
+    """The `compactions (med)` column is gone from the Summary table in
+    both renderings (the compaction facts stay in the per-run table and
+    Run details)."""
+    _write_run(tmp_path, make_metrics("r1", "s1", "c1"))
+    md_path = generate_report(tmp_path, html=True)
+    md = md_path.read_text(encoding="utf-8")
+    html = md_path.with_suffix(".html").read_text(encoding="utf-8")
+    assert "compactions (med)" not in md
+    assert "<th>compactions (med)</th>" not in html
+    # The per-run table keeps its own compactions column.
+    assert "compactions (ok/started/failed)" in md
+
+
+def test_commit_codes_in_gate_cell_and_glossary(tmp_path: Path) -> None:
+    """The measured report_committed (s9) rides in the summary `gate`
+    cell as a terse commit-yes/no/mixed code — nothing is appended when
+    no run of the pair measured the metric — spelled out in the Glossary
+    and given `<abbr>` tooltips in HTML; the Summary preamble no longer
+    explains the metric (that text moved to the glossary entries)."""
+    committed = make_metrics("r-yes", "s9", "c1")
+    committed["result"] = {
+        "ok": True,
+        "checks_ok": True,
+        "checks_metrics": {"report_committed": True},
+    }
+    _write_run(tmp_path, committed)
+    not_committed = make_metrics("r-no", "s9", "c2")
+    not_committed["result"] = {
+        "ok": True,
+        "checks_ok": True,
+        "checks_metrics": {"report_committed": False},
+    }
+    _write_run(tmp_path, not_committed)
+    for rid in ("r-m1", "r-m2"):  # disagreeing repeats → mixed
+        mixed = make_metrics(rid, "s9", "c3")
+        mixed["result"] = {
+            "ok": True,
+            "checks_ok": True,
+            "checks_metrics": {"report_committed": rid == "r-m1"},
+        }
+        _write_run(tmp_path, mixed)
+    _write_run(tmp_path, make_metrics("r-none", "s1", "c1"))  # no metric at all
+    md_path = generate_report(tmp_path, html=True)
+    md = md_path.read_text(encoding="utf-8")
+    html = md_path.with_suffix(".html").read_text(encoding="utf-8")
+
+    def row(scenario: str, combo: str) -> str:
+        (found,) = [ln for ln in _summary_rows(md, scenario) if f" {combo} |" in ln]
+        return found
+
+    assert "n/a, commit-yes" in row("s9", "c1")
+    assert "n/a, commit-no" in row("s9", "c2")
+    assert "n/a, commit-mixed" in row("s9", "c3")
+    # s1 never measured the metric → bare gate cell, nothing appended.
+    (plain,) = _summary_rows(md, "s1")
+    assert "commit-" not in plain
+    # The glossary spells the codes out under the gate column.
+    assert "gate `commit-yes`" in md
+    assert "gate `commit-no`" in md
+    assert "gate `commit-mixed`" in md
+    assert "not a verdict gate" in md
+    # ... and the Summary preamble no longer does (moved to the glossary).
+    preamble = md.split("## Summary", 1)[1].split("| scenario |", 1)[0]
+    assert "report_committed" not in preamble
+    # HTML: tooltips cover the new gate codes.
+    assert ">commit-yes</abbr>" in html
+    assert ">commit-no</abbr>" in html
+    assert ">commit-mixed</abbr>" in html
+
+
 def test_html_indented_block_line_terminates_paragraph() -> None:
     """A non-blank line indented before `#`/`- `/`|` misses the unstripped
     outer dispatch but the stripped paragraph exclusion — the fallback

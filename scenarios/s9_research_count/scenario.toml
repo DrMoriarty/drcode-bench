@@ -26,7 +26,8 @@
 # research_git_push.md), but checks.py no longer fails a run whose
 # report was not committed — it emits `S9 metric: report_committed=`
 # instead, which the harness carries into result.json → metrics.json →
-# the report's `report_committed` column (sweeps 20261026/20261027:
+# the report's `gate` cell as commit-yes/no/mixed codes
+# (sweeps 20261026/20261027:
 # otherwise half the matrix dies on the lone "git log is empty" check
 # while the report content itself is correct). The docs artifact is
 # also named in the brief TITLE (same template as s10/s11): a

@@ -146,7 +146,8 @@ class RunReport:
     # Non-verdict facts parsed from checks.py stdout (`S9 metric:
     # report_committed=true`, §10): e.g. s9's commit discipline is
     # MEASURED, not gated — the metrics extractor copies this dict into
-    # metrics.json and the report renders its `report_committed` column.
+    # metrics.json and the report renders it as commit-* codes in the
+    # `gate` cell of the summary table.
     checks_metrics: dict[str, Any] = field(default_factory=dict)
     resolved_roles: dict[str, str] = field(default_factory=dict)
     # Effective max_context_tokens per role (scenario `[context]` caps and
