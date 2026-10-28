@@ -129,6 +129,14 @@ def tool_call_part(name: str) -> dict:
     return {"part_kind": "tool-call", "tool_name": name, "args": "{}"}
 
 
+def tool_return_msg(name: str, content: str) -> dict:
+    return {
+        "kind": "request",
+        "timestamp": "2025-06-01T10:00:07+00:00",
+        "parts": [{"part_kind": "tool-return", "tool_name": name, "content": content}],
+    }
+
+
 def write_task(workspace: Path, **fields) -> dict:
     task = {
         "id": fields.get("id", "abc123"),
@@ -598,17 +606,32 @@ def test_s3_checks_bite(tmp_path: Path, mutate) -> None:
 # -- S4: tester mid-round compaction ---------------------------------------------
 
 
+def _entry_lines(nums: range) -> str:
+    """data/listing.txt lines for a shown range; the file's last line is
+    pinned verbatim (the seed's acceptance target)."""
+    return "\n".join(
+        "entry 004500: epsilon payload-38 checksum=35500"
+        if n == 4500
+        else f"entry {n:06d}: payload-{n % 97}"
+        for n in nums
+    )
+
+
 def s4_tester_rounds(scenario_id: str = "s4_compaction_tester") -> list[list[dict]]:
-    """The intended S4 tester round: chunks of the listing, then the
-    mid-round compaction rewrites the round in place (summary inside the
-    LAST round), then the verdict."""
+    """The intended S4 tester round: whole listing chunks SHOWN by the
+    run_bash tool-returns (what survives the in-place round compaction —
+    the summarized-away pre-summary reads are gone from tester_messages),
+    the summary inside the LAST round, then the verdict."""
     return [
         [
             request_msg("Verify completed task: полный листинг data/listing.txt"),
+            request_msg(
+                "[context summary]\n\nПрогресс чтения листинга: read-through-line=4400 из 4500."
+            ),
             response_msg([tool_call_part("run_bash")]),
-            request_msg("[context summary]\n\nПрочитан листинг: 4500 строк, entry 004500 в конце."),
+            tool_return_msg("run_bash", "exit=0\n" + _entry_lines(range(4401, 4501))),
             response_msg([tool_call_part("set_verification")]),
-            response_msg([text_part("Листинг проверен полностью.")]),
+            response_msg([text_part("Листинг проверен полностью: 4500 строк.")]),
         ]
     ]
 
@@ -668,6 +691,40 @@ def test_s4_checks_green(tmp_path: Path) -> None:
         pytest.param(
             lambda t: {**t, "events": [e for e in t["events"] if "summarized" not in e["text"]]},
             id="compaction-never-succeeded",
+        ),
+        pytest.param(
+            lambda t: {
+                **t,
+                # The tail-pipe cheat (`sed -n 'A,Bp' … | tail -5`): 5-line
+                # slices leave gaps in the shown range even though the
+                # file's last line showed up and the verdict named it.
+                "tester_messages": [
+                    [
+                        *s4_tester_rounds()[0][:3],
+                        tool_return_msg("run_bash", "exit=0\n" + _entry_lines(range(4001, 4006))),
+                        tool_return_msg("run_bash", "exit=0\n" + _entry_lines(range(4496, 4501))),
+                        *s4_tester_rounds()[0][4:],
+                    ]
+                ],
+            },
+            id="piped-read-gaps",
+        ),
+        pytest.param(
+            lambda t: {
+                **t,
+                # No listing line ever shown by a tool return — the
+                # "reading" happened nowhere but in the verdict's words.
+                "tester_messages": [
+                    [
+                        s4_tester_rounds()[0][0],
+                        s4_tester_rounds()[0][1],
+                        response_msg([tool_call_part("run_bash")]),
+                        tool_return_msg("run_bash", "exit=0\n(no listing here)"),
+                        *s4_tester_rounds()[0][4:],
+                    ]
+                ],
+            },
+            id="listing-never-shown",
         ),
     ],
 )

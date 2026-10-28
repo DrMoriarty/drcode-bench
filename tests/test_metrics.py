@@ -858,9 +858,11 @@ def test_analyze_gate_ok_sequential() -> None:
     assert gate["overlaps"] == []
 
 
-def test_analyze_gate_bites_on_coder_inside_tester_round() -> None:
-    """A coder message stamped inside a tester round = both agents in
-    flight — the gate violation S6 exists to catch."""
+def test_analyze_gate_records_overlap_passively() -> None:
+    """A coder message stamped inside a tester round is recorded as an
+    overlap FACT — but the verdict stays "ok": in multi-task runs the
+    coder legitimately develops another task while the tester verifies
+    one (overlaps are passive diagnostics, §7 S6)."""
     tasks = [
         _gate_task(
             "bug",
@@ -876,7 +878,7 @@ def test_analyze_gate_bites_on_coder_inside_tester_round() -> None:
         ),
     ]
     gate = analyze_gate(tasks)
-    assert gate["verdict"] == "OVERLAP"
+    assert gate["verdict"] == "ok"
     (o,) = gate["overlaps"]
     assert o["source"] == "transcripts"
     assert "feature" in o["coder"] and "bug" in o["tester"]
@@ -888,9 +890,9 @@ def test_analyze_gate_no_testing() -> None:
 
 
 def test_analyze_gate_recorder_overlap_detected() -> None:
-    """Recorder-based gate check: coder-tag and tester-tag request
-    intervals overlap; the compaction entry (unmatched, §1.5) must not
-    affect the verdict."""
+    """Recorder-based overlap diagnostics: coder-tag and tester-tag
+    request intervals overlap (a passive fact, verdict stays "ok"); the
+    compaction entry (unmatched, §1.5) must not affect the verdict."""
     base = 1750000000.0  # 2025-06-15T15:06:40Z
     t0 = datetime.fromtimestamp(base, tz=UTC).isoformat()
     t1 = datetime.fromtimestamp(base + 55, tz=UTC).isoformat()
@@ -936,7 +938,7 @@ def test_analyze_gate_recorder_overlap_detected() -> None:
         },
     ]
     gate = analyze_gate(tasks, log)
-    assert gate["verdict"] == "OVERLAP"
+    assert gate["verdict"] == "ok"
     assert any(o["source"] == "recorder" for o in gate["overlaps"])
 
 

@@ -52,13 +52,11 @@ def _natural_key(text: str) -> tuple:
 # label prefix.
 GLOSSARY: dict[str, str] = {
     "ok": (
-        "the gate 'no development while testing is in flight' held: coder "
-        "and tester activity intervals never overlapped (verified from "
-        "transcripts and model_log.jsonl)"
-    ),
-    "OVERLAP": (
-        "gate violation: coder and tester activity overlapped (see the "
-        "per-run GATE VIOLATION block in Run details)"
+        "the coder/tester activity check (§7 S6) ran: tester rounds are "
+        "present; coder/tester interval overlaps, if any, are recorded "
+        "as PASSIVE diagnostics in metrics.json ('overlaps') — in "
+        "multi-task runs the coder legitimately works on other tasks "
+        "while the tester verifies one, so they are never a violation"
     ),
     "faults": (
         "faults injected by the proxy fault script (s7 [proxy] runs / "
@@ -86,14 +84,27 @@ GLOSSARY: dict[str, str] = {
 # Which column each glossary term belongs to (for the Glossary section).
 _GLOSSARY_COLUMN: dict[str, str] = {
     "ok": "gate",
-    "OVERLAP": "gate",
     "◉": "combo",
-    **{t: "stability" for t in GLOSSARY if t not in ("ok", "OVERLAP", "◉")},
+    **{t: "stability" for t in GLOSSARY if t not in ("ok", "◉")},
 }
 
 # Terms always carrying a count in the cells — shown in the glossary with
 # the `label×N` form (`faults×N`); the others appear bare at count 1.
 _GLOSSARY_COUNTED = frozenset({"faults", "compact-fail", "tester-fail", "net-retry"})
+
+# Legacy gate verdicts rendered as their modern equivalent (§7 S6): the
+# old "OVERLAP" gate was retired — coder/tester interval overlaps are
+# passive diagnostics (legitimate in multi-task runs), so artifacts from
+# before the retirement render as "ok" (the overlap facts themselves stay
+# in the per-run Run details). Unknown future verdicts pass through
+# untouched: old artifacts must never break rendering.
+_LEGACY_GATE_VERDICTS: dict[str, str] = {"OVERLAP": "ok"}
+
+
+def _gate_verdict(m: dict[str, Any]) -> str:
+    """The gate cell of a run (legacy verdicts normalized, see above)."""
+    verdict = (m.get("gate") or {}).get("verdict") or "n/a"
+    return _LEGACY_GATE_VERDICTS.get(verdict, verdict)
 
 
 def _glossary_lines() -> list[str]:
@@ -134,7 +145,7 @@ def _glossary_lines() -> list[str]:
 
 # Longest-first alternation so no term shadows a prefix of another; the
 # lookarounds keep whole-label matching (a term must not light up inside
-# a longer word, but `net-retry×3` and `OVERLAP ⚠` must match).
+# a longer word, but the counted `net-retry×3` must match).
 _GLOSSARY_TERM_RE = re.compile(
     rf"(?<![\w-])({'|'.join(re.escape(t) for t in sorted(GLOSSARY, key=len, reverse=True))})"
     r"(×\d+)?(?![\w-])"
@@ -610,7 +621,7 @@ def aggregate_pairs(
                 "output_tokens": tokens,
                 "model_requests": requests,
                 "tokens_by_role": _tokens_by_role(group),
-                "gate": sorted({((m.get("gate") or {}).get("verdict") or "n/a") for m in group}),
+                "gate": sorted({_gate_verdict(m) for m in group}),
                 "stability": sorted({_stability_flags(m) for m in group} - {"clean"}) or ["clean"],
             }
         )
@@ -791,9 +802,7 @@ def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
             "/".join(f"{t.get('kind')}:{t.get('verification') or t.get('status')}" for t in tasks)
             or "—"
         )
-        gate = (m.get("gate") or {}).get("verdict") or "n/a"
-        if gate == "OVERLAP":
-            gate += " ⚠"
+        gate = _gate_verdict(m)
         lines.append(
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
             f"| {_fmt(m.get('verdict'))} | {_sec_1dec(m.get('wall_time_s', {}).get('settle'))} "
@@ -846,17 +855,17 @@ def _run_details(runs: list[dict[str, Any]]) -> list[str]:
                 "⚠ Repeat compaction (§10): a context was compacted more "
                 "than once — degradation after the summary.\n"
             )
-        # The development/testing gate (§7 S6): coder and tester must never
-        # be in flight at the same time — verified from the transcripts
-        # and, when the recorder separates the roles, from model_log.jsonl.
+        # Coder/tester activity diagnostics (§7 S6, passive): overlap
+        # facts are informational only — in multi-task runs the coder
+        # legitimately works on other tasks while the tester verifies one.
         gate = m.get("gate")
-        if gate and gate.get("verdict") == "OVERLAP":
+        if gate and gate.get("overlaps"):
             lines.append(
-                "⚠ GATE VIOLATION: coder and tester activity overlapped — "
-                "the pipeline gate 'no development while testing is in "
-                "flight' did not hold.\n"
+                f"Diagnostic (§7 S6, passive): {len(gate['overlaps'])} "
+                "coder/tester activity overlap fact(s) recorded — "
+                "informational, not a gate violation.\n"
             )
-            for o in gate.get("overlaps") or []:
+            for o in gate["overlaps"]:
                 lines.append(f"- {o}")
             lines.append("")
         ttt = m.get("tester_threshold_from_tester")

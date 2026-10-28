@@ -17,11 +17,29 @@ The verdict is NEVER built on the agents' words:
          prompt (the round was rewritten in place);
        - a verdict was set (verification is not None) and the task is
          COMPLETED (PASSED — the followup must not have been needed).
+   3. the listing must have really been SHOWN to the tester: the
+      run_bash tool-returns of the testing rounds are mined for
+      'entry NNNNNN: …' lines and the shown range must be contiguous,
+      end at the file's last line with its exact text. A verdict built
+      on a piped read (`sed -n '1,500p' … | tail -5`: 5 lines per
+      500-line portion) leaves huge gaps in the shown range and fails
+      here even when the verdict itself was word-perfect.
+
+      NOTE on the pre-compaction reads: drcode's in-place round
+      compaction (compaction.py `compacted_messages`) keeps only the
+      original prompts verbatim plus the summary — the tool-returns
+      summarized away are gone from tester_messages, so the literal
+      'lines 1..4500 all shown' is provable only for runs that never
+      compacted. Hence: without a summary in any round the shown range
+      must START at line 1 (a full uncompacted read always does);
+      with a summary, only the surviving suffix is verifiable and the
+      start line is not demanded.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +53,33 @@ TESTER_START_NEEDLES = (
     "pausing the tester round to compact history",
 )
 TESTER_SUCCESS_NEEDLE = "testing round summarized"
+
+# The acceptance target (scenario.toml brief): the seed's data/listing.txt
+# is 4500 'entry NNNNNN: …' lines; the last one is pinned verbatim.
+LISTING_LINES = 4500
+LISTING_LAST_LINE = "epsilon payload-38 checksum=35500"
+_ENTRY_RE = re.compile(r"^entry (\d{6}): (.*)$")
+
+
+def shown_listing_lines(tester_messages: list) -> dict[int, str]:
+    """Lines of data/listing.txt actually SHOWN to the tester: the
+    'entry NNNNNN: …' lines mined from run_bash tool-returns across all
+    testing rounds, in transcript order (line number -> shown text)."""
+    shown: dict[int, str] = {}
+    for rnd in tester_messages:
+        for msg in rnd:
+            for part in msg.get("parts") or []:
+                if not (
+                    isinstance(part, dict)
+                    and part.get("part_kind") == "tool-return"
+                    and part.get("tool_name") == "run_bash"
+                ):
+                    continue
+                for line in str(part.get("content") or "").splitlines():
+                    m = _ENTRY_RE.match(line)
+                    if m:
+                        shown[int(m.group(1))] = m.group(2)
+    return shown
 
 
 def main() -> int:
@@ -136,13 +181,67 @@ def main() -> int:
             "the last round"
         )
 
+        # 3. The reading-coverage check: what the tool-returns really showed.
+        shown = shown_listing_lines(rounds)
+        if not shown:
+            failures.append(
+                f"task {tid}: no data/listing.txt lines in the tester's "
+                "run_bash tool-returns — the listing was never read (the "
+                "brief's acceptance requirement)"
+            )
+        else:
+            lo, hi = min(shown), max(shown)
+            gaps = [n for n in range(lo, hi + 1) if n not in shown]
+            if gaps:
+                preview = ", ".join(f"entry {n:06d}" for n in gaps[:8])
+                more = "" if len(gaps) <= 8 else f" … (+{len(gaps) - 8} more)"
+                failures.append(
+                    f"task {tid}: shown listing range {lo}..{hi} has "
+                    f"{len(gaps)} gap(s) — portions were filtered/truncated "
+                    f"instead of being shown whole (first gaps: {preview}{more})"
+                )
+            if hi != LISTING_LINES:
+                failures.append(
+                    f"task {tid}: the last shown listing line is "
+                    f"entry {hi:06d}, expected {LISTING_LINES} — the file's "
+                    "tail was never shown"
+                )
+            elif shown[LISTING_LINES] != LISTING_LAST_LINE:
+                failures.append(
+                    f"task {tid}: the last listing line drifted: "
+                    f"entry {LISTING_LINES:06d}: {shown[LISTING_LINES]!r}, "
+                    f"expected {LISTING_LAST_LINE!r}"
+                )
+            if not any(
+                isinstance(p, dict)
+                and p.get("part_kind") == "user-prompt"
+                and isinstance(p.get("content"), str)
+                and p["content"].startswith(COMPACTION_SUMMARY_PREFIX)
+                for rnd in rounds
+                for msg in rnd
+                for p in msg.get("parts") or []
+            ) and lo != 1:
+                # No compaction anywhere → nothing was summarized away → a
+                # full sequential read must start at the very first line.
+                failures.append(
+                    f"task {tid}: no tester compaction, so no read may have "
+                    f"been summarized away, yet the first shown listing line "
+                    f"is entry {lo:06d}, not entry 000001 — the reading was "
+                    "not sequential from the file start"
+                )
+            notes.append(
+                f"task {tid}: listing lines shown {lo}..{hi} "
+                f"({hi - lo + 1} of {LISTING_LINES})"
+            )
+
     if failures:
         print("S4 checks FAILED:")
         for f in failures:
             print(f"- {f}")
         return 1
     print("S4 checks: green (pytest passed, bug COMPLETED/PASSED, "
-          "tester mid-round compaction + summary in the last round)")
+          "tester mid-round compaction + summary in the last round, "
+          "listing shown whole to the tester)")
     for n in notes:
         print(f"- {n}")
     return 0

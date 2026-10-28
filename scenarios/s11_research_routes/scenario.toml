@@ -30,9 +30,13 @@
 # write_file / edit_file / run_bash may only touch documentation
 # (*.md, AGENTS.md, docs/) — docs/routes.md fits. The brief tells the
 # agent to create the file with write_file so it lands in
-# task.edited_files and the mandatory git_commit_docs commits it —
-# the stricter "git log -- docs/routes.md non-empty" check of
-# checks.py relies on that.
+# task.edited_files AND to finish with git_commit_docs explicitly —
+# the expectation "a documentation assignment ends with a commit"
+# otherwise lives only in the agent's system prompt, which glm-based
+# combos skipped in ~40% of runs (2026-10-27: 4 fails out of 10 where
+# the table itself was always correct). The stricter
+# "git log -- docs/routes.md non-empty" check of checks.py measures
+# the scenario contract stated in the brief, not the system convention.
 
 id = "s11_research_routes"
 timeout = 30  # minutes — soft limit (§4: 30–60 min)
@@ -57,5 +61,9 @@ text = """
 
 Способ извлечения не важен (grep_search, read_file, run_bash — как
 удобнее), но список нужно составить чтением кода, а не по догадке.
+
+Завершите работу коммитом созданного файла: вызовите инструмент
+git_commit_docs — документационное задание считается выполненным
+только после того, как docs/routes.md закоммичен.
 Исходные файлы не изменяйте.
 """
