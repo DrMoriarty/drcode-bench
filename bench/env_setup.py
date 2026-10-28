@@ -126,6 +126,11 @@ def project_settings(task_finalization: str) -> dict[str, object]:
         "worktree_removal": "on_delete",  # dormant under isolation=off, pinned anyway
         "github_enabled": False,  # §13: a run must never touch the external network
         "keep_awake": False,  # a headless bench subprocess holds no system-sleep assertion
+        # 0 = the delegate_research tool is never registered (SubagentGate
+        # stays None): a bench run exercises only the roles the combo
+        # defines, no hidden subagent fan-out (upstream drcode 878f0f4).
+        "subagents_coder": 0,
+        "subagents_researcher": 0,
     }
 
 

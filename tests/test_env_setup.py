@@ -140,6 +140,8 @@ def test_prepare_run_tree(scenario_dir, combo, matrix_file, tmp_path, monkeypatc
         "worktree_removal": "on_delete",
         "github_enabled": False,
         "keep_awake": False,
+        "subagents_coder": 0,
+        "subagents_researcher": 0,
     }
 
     # no remote for plain "testing"
