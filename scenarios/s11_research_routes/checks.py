@@ -32,9 +32,11 @@ The verdict is NEVER built on the agents' words:
   4. The stricter git check: `git log -- docs/routes.md` is non-empty,
      i.e. the research agent's mandatory git_commit_docs really
      committed the table (the workspace is a git repo with a seed
-     commit, bench/env_setup.py; the brief told the agent to create
-     the file with write_file so it lands in task.edited_files and is
-     committable). If git itself is unavailable the check is skipped —
+     commit, bench/env_setup.py; the brief tells the agent to create
+     the file with write_file so it lands in task.edited_files and to
+     finish with git_commit_docs — the commit requirement is part of
+     the scenario contract, stated in the brief itself). If git
+     itself is unavailable the check is skipped —
      a report committed by no means is caught by (3)'s event trail in
      the diagnostics instead.
 """
