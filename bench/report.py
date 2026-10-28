@@ -128,10 +128,14 @@ def _glossary_lines() -> list[str]:
         "a pair is only as good as its worst repeat).",
         "- `score (α·t+β$)` — cost = α·t_norm + β·m_norm, where t_norm / "
         "m_norm divide the pair's median wall-time / median cost by the "
-        "scenario's best pair (best → 1.0, so scores are comparable "
-        "across scenarios); α is the `--time-weight` (default 0 = money "
-        "only), β is fixed at 1. The cell shows the median over the "
-        "repeats of each repeat's normalized score, with the spread.",
+        "scenario's best GREEN repeat (the fastest / cheapest green run; "
+        "it scores 1.0, so scores are comparable across scenarios); α is "
+        "the `--time-weight` (default 0 = money only), β is fixed at 1. "
+        "Only the pair's GREEN repeats are scored (red repeats are "
+        "skipped), so any pair with at least one green repeat gets a "
+        "score; a fully failed pair renders `—`. The cell shows the "
+        "median over the scored repeats of each repeat's normalized "
+        "score, with the spread.",
         "- With 1–3 repeats the score is a RANKING, not a ratio: treat "
         "it as an ordinal 'which pair is better', never as '2× better'.",
         "- `cost $ (med)` is computed only when every model referenced by "
@@ -190,8 +194,8 @@ def _fmt(value: Any, suffix: str = "") -> str:
 # noise; the per-task phases.dev_s/testing_s of metrics.analyze_phases is
 # the cleaner alternative — acceptable to keep settle for v1), m = the
 # pair's median cost in $ (Σ over roles of input·price_in +
-# output·price_out). t_norm / m_norm divide by the scenario's best pair,
-# so scores are comparable across scenarios.
+# output·price_out). t_norm / m_norm divide by the scenario's best GREEN
+# repeat, so scores are comparable across scenarios.
 
 
 @dataclass(frozen=True)
@@ -341,7 +345,7 @@ def _pareto_frontier(group: list[dict[str, Any]]) -> set[int]:
 
 def _apply_quality(
     pairs: list[dict[str, Any]],
-    raw: dict[tuple[str, str], tuple[list[Any], list[Any]]],
+    raw: dict[tuple[str, str], tuple[list[Any], list[Any], list[str]]],
     time_weight: float,
 ) -> None:
     """Attach the scenario-relative quality figures to the aggregated
@@ -354,19 +358,31 @@ def _apply_quality(
     divisions run on RAW (`cost_usd` is aggregated unrounded) values, so
     sub-dollar costs cannot zero out the score.
 
-    Like `_pareto_frontier`, the baseline is GREEN-only (§10: the score
-    is computed over the GREEN repeats): a failed pair dies early — it is
-    fast and cheap, and letting it set t_min/m_min would inflate every
-    green pair's norms. A pair that is not all-green gets no score; a
-    scenario with no green pair has no baseline at all (everything `—`)."""
+    The score is GREEN-only (§10): every pair with pass_rate > 0 (at
+    least one green repeat) gets one, computed over its GREEN repeats —
+    red repeats neither contribute to the score nor to the baseline. The
+    baseline itself (t_min/m_min) is the min over the scenario's GREEN
+    repeats' own values (not pair medians): a fully failed pair dies
+    early — it is fast and cheap, and letting it set t_min/m_min would
+    inflate every green pair's norms. A pair with no green repeat gets
+    no score; a scenario with no green pair has no baseline at all
+    (everything `—`)."""
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     for p in pairs:
         by_scenario.setdefault(p["scenario"], []).append(p)
     for group in by_scenario.values():
-        green_times = [p["wall_time_s"]["median"] for p in group if p["verdicts"] == ["green"]]
-        green_costs = [p["cost_usd"]["median"] for p in group if p["verdicts"] == ["green"]]
-        t_min = min((t for t in green_times if t is not None), default=None)
-        m_min = min((c for c in green_costs if c is not None), default=None)
+        green_times: list[float] = []
+        green_costs: list[float] = []
+        for p in group:
+            times, costs, verdicts_ = raw[(p["scenario"], p["combo"])]
+            green_times += [
+                t for t, v in zip(times, verdicts_, strict=False) if v == "green" and t is not None
+            ]
+            green_costs += [
+                c for c, v in zip(costs, verdicts_, strict=False) if v == "green" and c is not None
+            ]
+        t_min = min(green_times, default=None)
+        m_min = min(green_costs, default=None)
         front = _pareto_frontier(group)
         for i, p in enumerate(group):
             t_med, m_med = p["wall_time_s"]["median"], p["cost_usd"]["median"]
@@ -382,13 +398,14 @@ def _apply_quality(
                 p["m_norm"] = round(m_med / m_min, 2)
             else:
                 p["m_norm"] = 1.0 if m_med == 0 else None
-            run_times, run_costs = raw[(p["scenario"], p["combo"])]
+            run_times, run_costs, run_verdicts = raw[(p["scenario"], p["combo"])]
             scores = []
-            # the score is defined only over the GREEN repeats — a
-            # non-green pair is ranked by outcome class first anyway
-            if p["verdicts"] == ["green"]:
-                for t, c in zip(run_times, run_costs, strict=False):
-                    if t is None or c is None or not t_min or m_min is None:
+            # the score is defined only over the GREEN repeats — a pair
+            # needs at least one (pass_rate > 0); red repeats are skipped
+            # (they are ranked by outcome class first anyway)
+            if p["pass_rate"] > 0:
+                for t, c, v in zip(run_times, run_costs, run_verdicts, strict=False):
+                    if v != "green" or t is None or c is None or not t_min or m_min is None:
                         continue
                     # money term: c/m_min normally; against a free best pair
                     # (m_min == 0) a zero-cost repeat sits at the optimum (1.0)
@@ -554,7 +571,8 @@ def aggregate_pairs(
     `outcome_class` — the worst verdict over the repeats;
     `cost_usd` — median $ per run (None for every repeat when `pricing`
     is absent or the combo references an unpriced model);
-    `quality_score` — per-repeat α·t_norm + β·m_norm (`time_weight` = α,
+    `quality_score` — per-repeat α·t_norm + β·m_norm over the pair's
+    GREEN repeats only (None when the pair has none; `time_weight` = α,
     β = 1; the money-only default α = 0 is the only externally
     justifiable collapse, α > 0 is opt-in); `pareto` — on the scenario's
     Pareto frontier over (median wall-time, median cost $) among green
@@ -567,7 +585,9 @@ def aggregate_pairs(
         groups.setdefault(key, []).append(m)
 
     pairs = []
-    raw: dict[tuple[str, str], tuple[list[Any], list[Any]]] = {}
+    # per-repeat raws for `_apply_quality`: (settle times, $ costs,
+    # verdicts) aligned by repeat — the score filters the GREEN ones.
+    raw: dict[tuple[str, str], tuple[list[Any], list[Any], list[str]]] = {}
     for (scenario, combo), group in sorted(
         groups.items(),
         key=lambda kv: (_natural_key(kv[0][0]), _natural_key(kv[0][1])),
@@ -581,7 +601,11 @@ def aggregate_pairs(
             )
             for m in group
         ]
-        raw[(scenario, combo)] = (run_times, run_costs)
+        raw[(scenario, combo)] = (
+            run_times,
+            run_costs,
+            [m.get("verdict") or "unknown" for m in group],
+        )
         wall = _agg(run_times)
         compactions = _agg([(m.get("totals") or {}).get("n_compactions") for m in group])
         rounds = _agg([(m.get("totals") or {}).get("n_testing_rounds") for m in group])
@@ -748,7 +772,8 @@ def _winner_rows(pairs: list[dict[str, Any]]) -> list[str]:
         "failed/unknown, then the share of green repeats, then ascending "
         "cost = α·t_norm + β·m_norm (α = `--time-weight`, default 0 = money "
         "only; β fixed at 1). t_norm / m_norm — the pair's median wall-time "
-        "/ cost relative to the scenario's best pair (best → 1.0); unpriced "
+        "/ cost relative to the scenario's best green repeat (the "
+        "fastest / cheapest green run → 1.0); unpriced "
         "pairs (`—`) rank after priced ones by wall-time.",
         "",
         "| scenario | rank | combo | outcome | pass rate | wall-time (med, s) "
@@ -775,17 +800,13 @@ def _winner_rows(pairs: list[dict[str, Any]]) -> list[str]:
 
 def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| run | scenario | combo | verdict | wall-time | checks | report_committed | compactions "
+        "| run | scenario | combo | verdict | wall-time | report_committed | compactions "
         "(ok/started/failed) | testing rounds | sim interventions | tasks | gate | stability | artifacts |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in runs:
         run_id = m.get("run_id") or "?"
         rel = run_id  # report sits in runs_dir → links relative to it
-        checks = m.get("result", {}).get("checks_ok")
-        checks_str = {True: "green", False: "RED", None: "n/a"}.get(
-            checks if checks is None else bool(checks), "n/a"
-        )
         committed = ((m.get("result") or {}).get("checks_metrics") or {}).get("report_committed")
         committed_str = "yes" if committed is True else "no" if committed is False else "—"
         comp = m.get("totals", {})
@@ -806,7 +827,7 @@ def _run_rows(runs: list[dict[str, Any]]) -> list[str]:
         lines.append(
             f"| [{run_id}]({rel}/) | {_fmt(m.get('scenario'))} | {_fmt(m.get('combo'))} "
             f"| {_fmt(m.get('verdict'))} | {_sec_1dec(m.get('wall_time_s', {}).get('settle'))} "
-            f"| {checks_str} | {committed_str} | {comp_str} "
+            f"| {committed_str} | {comp_str} "
             f"| {_fmt(comp.get('n_testing_rounds'))} | {sim_str} | {verdicts} "
             f"| {gate} "
             f"| {_stability_flags(m)} "
@@ -1047,8 +1068,11 @@ def _verdict_row_class(cell: str) -> str | None:
     """CSS class for a table row, derived from the text of its verdict
     cell: green-only → `verdict-ok`, failed-only → `verdict-fail`,
     a mix of both (one combo with correct and failed repeats) →
-    `verdict-mixed`; anything else (`settled-but-flagged`, `unknown`,
-    missing column) stays uncoloured.
+    `verdict-mixed`; `settled-but-flagged` (the winners table's outcome
+    column, and the same verdict appearing in a summary cell) is also
+    `verdict-mixed` — the run finished but was flagged, i.e. partially
+    good, so it shares the pale-yellow "neither fully green nor failed"
+    colour; anything else (`unknown`, missing column) stays uncoloured.
     Summary-table verdict cells carry no markdown links (only the run
     count cell does), but the stripping keeps the helper safe either
     way."""
@@ -1062,6 +1086,10 @@ def _verdict_row_class(cell: str) -> str | None:
         return "verdict-fail"
     if has_ok:
         return "verdict-ok"
+    # no green, no failed → the only colourable leftover is the
+    # single-valued `settled-but-flagged` (winners table outcome)
+    if verdicts == {"settled-but-flagged"}:
+        return "verdict-mixed"
     return None
 
 
@@ -1112,7 +1140,8 @@ def _md_to_html(md: str) -> str:
         ".spread{color:#777;font-size:0.85em;}",
         "td.num{text-align:right;}",
         # Verdict colouring (§10): pale green — all repeats green, pale red —
-        # all repeats failed, pale yellow — a summary row mixing both.
+        # all repeats failed, pale yellow — a summary row mixing both or a
+        # winners-table row settled-but-flagged.
         "tr.verdict-ok{background:#d9ead3;}",
         "tr.verdict-fail{background:#f4cccc;}",
         "tr.verdict-mixed{background:#fff2cc;}",
@@ -1163,9 +1192,10 @@ def _md_to_html(md: str) -> str:
                 tag = "th" if r == 0 else "td"
                 if r == 0:
                     # Colouring hook: locate the verdict column of the
-                    # summary/runs tables (the dissection tables have none).
+                    # summary/runs tables and the outcome column of the
+                    # winners table (the dissection tables have none).
                     for c, cell in enumerate(row):
-                        if cell.lower() in ("verdict", "verdicts"):
+                        if cell.lower() in ("verdict", "verdicts", "outcome"):
                             verdict_col = c
                             break
                 classes: list[str] = []

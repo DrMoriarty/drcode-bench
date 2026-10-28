@@ -814,15 +814,16 @@ def test_subdollar_cost_not_rounded_to_zero(pricing) -> None:
     assert cost["median"] == pytest.approx(0.0156)
     assert cost["min"] == pytest.approx(0.0106)
     assert cost["max"] == pytest.approx(0.0206)
-    # score divides by the RAW best median (this pair's own median here);
-    # with α = 0 the median of the per-repeat scores is the m_norm = 1.0
-    # (min/max are the per-repeat ratios 0.0106/0.0156 and 0.0206/0.0156,
-    # displayed at the score column's 1-decimal granularity)
+    # score divides by the RAW best GREEN repeat (this pair's own cheaper
+    # repeat here, $0.0106 — the baseline is per green repeat, not the
+    # pair median); with α = 0 the median of the per-repeat scores is the
+    # m_norm (0.0156/0.0106), and min/max are the per-repeat ratios
+    # (1.0 and 0.0206/0.0106, displayed at the score column's 1 decimal)
     scores = _pairs_by_combo(runs, pricing)["priced"]["quality_score"]
     assert scores["median"] is not None
-    assert scores["median"] == pytest.approx(1.0)
-    assert scores["min"] == pytest.approx(round(0.0106 / 0.0156, 1))
-    assert scores["max"] == pytest.approx(round(0.0206 / 0.0156, 1))
+    assert scores["median"] == pytest.approx(round(0.0156 / 0.0106, 1))
+    assert scores["min"] == pytest.approx(1.0)
+    assert scores["max"] == pytest.approx(round(0.0206 / 0.0106, 1))
 
 
 def test_subdollar_cost_renders_and_scores(tmp_path: Path, pricing) -> None:
@@ -1062,6 +1063,123 @@ def test_score_baseline_is_green_only(pricing) -> None:
     assert pairs["zero-priced"]["m_norm"] == 0.0
 
 
+def test_score_partial_green_pair_scores_green_repeats_only(pricing) -> None:
+    """A pair with pass_rate > 0 gets a score computed over its GREEN
+    repeats only: the failed repeat's numbers (fast and cheap) neither
+    enter the score nor the scenario's t_min/m_min baseline (regression:
+    a not-all-green pair used to get no score at all). A pair with no
+    green repeat still renders `—`."""
+    runs = [
+        make_metrics(
+            "r-m-green",
+            "s5",
+            "mixed",
+            verdict="green",
+            wall_time_s={"settle": 100.0},
+            model_log=_traffic("model-a", 4_000_000, 1_000_000),  # $5.0
+        ),
+        make_metrics(
+            "r-m-fail",
+            "s5",
+            "mixed",
+            verdict="failed",
+            wall_time_s={"settle": 10.0},
+            model_log=_traffic("model-a", 500_000, 0),  # $0.5
+        ),
+        make_metrics(
+            "r-cheap",
+            "s5",
+            "cheap",
+            wall_time_s={"settle": 200.0},
+            model_log=_traffic("model-a", 1_500_000, 500_000),  # $2.0
+        ),
+    ]
+    pairs = _pairs_by_combo(runs, pricing)
+    # baseline: green repeats only → t_min = 100 (the green repeat of
+    # `mixed`, NOT its failed 10 s repeat), m_min = 2.0
+    mixed, cheap = pairs["mixed"], pairs["cheap"]
+    assert mixed["pass_rate"] == 0.5
+    assert mixed["quality_score"] == {"n": 1, "median": 2.5, "min": 2.5, "max": 2.5}
+    assert cheap["quality_score"]["median"] == 1.0
+    assert cheap["t_norm"] == 2.0 and cheap["m_norm"] == 1.0
+    # norms are pair medians (the failed repeat's fast/cheap numbers are
+    # IN the median) over the green-repeat baseline: median t = 55 s, $2.75
+    assert mixed["t_norm"] == 0.55 and mixed["m_norm"] == 1.38
+    # a fully failed pair still has no score
+    runs_fail_only = [
+        make_metrics(
+            "r-f",
+            "s6",
+            "mixed",
+            verdict="failed",
+            wall_time_s={"settle": 10.0},
+            model_log=_traffic("model-a", 500_000, 0),
+        )
+    ]
+    assert _pairs_by_combo(runs_fail_only, pricing)["mixed"]["quality_score"]["median"] is None
+
+
+def test_html_winners_outcome_colouring(tmp_path: Path, pricing) -> None:
+    """The winners table's `outcome` column drives the row colouring like
+    the summary's verdict column: green → verdict-ok, failed →
+    verdict-fail, settled-but-flagged → verdict-mixed (pale yellow — the
+    run finished but was flagged)."""
+    _write_run(
+        tmp_path,
+        make_metrics("r-g", "s1", "priced", model_log=_traffic("model-a", 1_000_000, 1_000_000)),
+    )
+    _write_run(
+        tmp_path,
+        make_metrics(
+            "r-f", "s1", "pricey", verdict="failed", model_log=_traffic("model-b", 1_000_000, 0)
+        ),
+    )
+    _write_run(
+        tmp_path,
+        make_metrics(
+            "r-s",
+            "s1",
+            "cheap",
+            verdict="settled-but-flagged",
+            model_log=_traffic("model-a", 1_000_000, 0),
+        ),
+    )
+    text = (
+        generate_report(tmp_path, pricing=pricing, html=True)
+        .with_suffix(".html")
+        .read_text(encoding="utf-8")
+    )
+    winners = text.split("Scenario winners", 1)[1]
+    assert '<tr class="verdict-ok"><td>s1</td><td>1</td><td>priced</td>' in winners
+    assert '<tr class="verdict-mixed"><td>s1</td><td>2</td><td>cheap</td>' in winners
+    assert '<tr class="verdict-fail"><td>s1</td><td>3</td><td>pricey</td>' in winners
+
+
+def test_run_rows_drop_checks_column(tmp_path: Path) -> None:
+    """The runs table no longer carries the `checks` column (verdict and
+    the artifacts links already tell green from red): neither the header
+    nor any row cell (e.g. the old `RED`) renders it, and the row keeps
+    the report_committed cell right after wall-time."""
+    _write_run(
+        tmp_path,
+        make_metrics("r1", "s1", "c1"),
+        result={"ok": True, "checks_ok": False},  # old table would show RED
+    )
+    text = generate_report(tmp_path).read_text(encoding="utf-8")
+    runs = text.split("## Runs", 1)[1]
+    header = next(ln for ln in runs.splitlines() if ln.startswith("| run "))
+    assert "checks" not in header
+    assert header == (
+        "| run | scenario | combo | verdict | wall-time | report_committed | compactions "
+        "(ok/started/failed) | testing rounds | sim interventions | tasks | gate | stability | artifacts |"
+    )
+    (row,) = [ln for ln in runs.splitlines() if ln.startswith("| [r1]")]
+    # the verdict cell (legitimately `green`) is now followed directly by
+    # wall-time and report_committed — no checks cell (old: `| RED |`)
+    assert "| RED |" not in row
+    assert "| green | 100.0 s | — | 2/2/0 |" in row
+
+
 def test_html_spread_for_cost_and_score(tmp_path: Path, pricing) -> None:
     """Cost and score cells carry `$` prefixes / decimals — the HTML
     rendering still splits their spread onto the second line."""
@@ -1079,10 +1197,10 @@ def test_html_spread_for_cost_and_score(tmp_path: Path, pricing) -> None:
         .read_text(encoding="utf-8")
     )
     # costs 2.0 / 3.0 → median $2.5, spread $2–$3; α=0 scores are the
-    # per-repeat costs over the scenario's best pair median (2.5):
-    # 0.8 / 1.2 → median 1, spread 0.8–1.2
+    # per-repeat costs over the scenario's best green repeat ($2.0):
+    # 1.0 / 1.5 → median 1.2, spread 1–1.5
     assert '<span class="spread">$2–$3</span>' in text
-    assert '<span class="spread">0.8–1.2</span>' in text
+    assert '<span class="spread">1–1.5</span>' in text
 
 
 def test_glossary_explains_ranking(tmp_path: Path, pricing) -> None:
