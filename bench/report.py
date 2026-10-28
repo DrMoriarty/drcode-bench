@@ -4,10 +4,10 @@
     python -m bench report runs/ --html    # + report.html
 
 The summary table is combo × scenario (§10): rows — median wall-time,
-median/sum tokens per role, verdict, number of compactions — with the
-spread over the repeats (min…max). Every cell would otherwise repeat the
-same link, so only the run count points to the pair's representative run
-(`runs/<run_id>/`, the median-wall repeat).
+median/sum tokens per role, verdict — with the spread over the repeats
+(min…max). Every cell would otherwise repeat the same link, so only the
+run count points to the pair's representative run (`runs/<run_id>/`, the
+median-wall repeat).
 
 The per-run table links the artifacts of every run (metrics.json,
 result.json, the run dir) so each run stays reproducibly dissectible.
@@ -58,6 +58,20 @@ GLOSSARY: dict[str, str] = {
         "multi-task runs the coder legitimately works on other tasks "
         "while the tester verifies one, so they are never a violation"
     ),
+    "commit-yes": (
+        "report_committed (s9): the measured git_commit_docs discipline — "
+        "the run's report was committed; a METRIC, not a verdict gate "
+        "(a `no` pair can still be a green run)"
+    ),
+    "commit-no": (
+        "report_committed (s9): the measured git_commit_docs discipline — "
+        "the report was NOT committed; a METRIC, not a verdict gate "
+        "(a `no` pair can still be a green run)"
+    ),
+    "commit-mixed": (
+        "report_committed (s9): the pair's repeats disagree on whether "
+        "git_commit_docs committed the report"
+    ),
     "faults": (
         "faults injected by the proxy fault script (s7 [proxy] runs / "
         "--use-proxy); the retries they caused appear alongside as net-retry"
@@ -85,7 +99,12 @@ GLOSSARY: dict[str, str] = {
 _GLOSSARY_COLUMN: dict[str, str] = {
     "ok": "gate",
     "◉": "combo",
-    **{t: "stability" for t in GLOSSARY if t not in ("ok", "◉")},
+    **{t: "gate" for t in ("commit-yes", "commit-no", "commit-mixed")},
+    **{
+        t: "stability"
+        for t in GLOSSARY
+        if t not in ("ok", "◉", "commit-yes", "commit-no", "commit-mixed")
+    },
 }
 
 # Terms always carrying a count in the cells — shown in the glossary with
@@ -562,7 +581,8 @@ def aggregate_pairs(
     Shape is repeat-ready: every pair carries `_agg` blocks for wall-time,
     compactions, testing rounds and the recorder's model traffic
     (requests, tokens per role — §10; latency p50/p95 stays per run in
-    the run details); verdicts list all
+    the run details; the `compactions` block is kept in the pair dict but
+    no longer rendered as a summary column); verdicts list all
     outcomes seen across the repeats (a pair is only as good as its worst
     repeat). `repr_run` is the median-wall repeat — the run whose
     artifacts the summary table links to.
@@ -612,9 +632,10 @@ def aggregate_pairs(
         round_trips = _agg([len(m.get("bug_round_trips") or []) for m in group])
         sim_interventions = _agg([(m.get("user_sim") or {}).get("interventions") for m in group])
         # Measured commit discipline (s9, §10): the `report_committed`
-        # metric parsed from checks.py stdout — NOT a verdict gate, shown
-        # as its own column so a missing commit stays visible in the
-        # matrix without failing the run.
+        # metric parsed from checks.py stdout — NOT a verdict gate;
+        # rendered as terse commit-yes/no/mixed codes appended to the
+        # gate cell, so a missing commit stays visible in the matrix
+        # without failing the run.
         report_committed = [
             ((m.get("result") or {}).get("checks_metrics") or {}).get("report_committed")
             for m in group
@@ -664,12 +685,13 @@ def _representative_run(group: list[dict[str, Any]], wall: dict[str, Any]) -> st
 
 
 def _commit_cell(values: list[Any]) -> str:
-    """The summary-table `report_committed` cell (s9, §10): the measured
-    commit discipline over the pair's repeats. `yes` / `no` when every
-    run with a measurement agrees, `mixed` when the repeats disagree,
-    `—` when no run of the pair measured the metric at all (scenarios
-    without the metric render `—` too). The metric is NOT a verdict
-    gate: a `no` pair is still a green run whose report simply was not
+    """The commit-discipline part of the summary-table `gate` cell
+    (s9, §10): the measured `report_committed` over the pair's repeats.
+    `yes` / `no` when every run with a measurement agrees, `mixed` when
+    the repeats disagree, `—` when no run of the pair measured the metric
+    at all (scenarios without the metric render `—` too — nothing is
+    appended to the gate cell then). The metric is NOT a verdict gate:
+    a `no` pair is still a green run whose report simply was not
     committed by git_commit_docs."""
     known = {v for v in values if v is not None}
     if not known:
@@ -727,11 +749,11 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
     lines = [
         "| scenario | combo | runs | verdicts | pass rate | cost $ (med) | "
         "score (α·t+β$) | wall-time (median, s) | "
-        "compactions (med) | testing rounds (med) | bug round-trips (med) | "
+        "testing rounds (med) | bug round-trips (med) | "
         "sim interventions (med) | output tokens (med) | "
         "model requests (med) | tokens by role (med, prompt/compl.) | "
-        "report_committed | gate | stability |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "gate | stability |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for p in pairs:
         tokens_by_role = "; ".join(
@@ -739,6 +761,11 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             for role, v in p["tokens_by_role"].items()
         )
         pareto = "◉ " if p["pareto"] else ""
+        # The measured commit discipline (s9) rides in the gate cell as a
+        # terse commit-* code (§10); when no run of the pair measured the
+        # metric, nothing is appended.
+        commit = _commit_cell(p["report_committed"])
+        gate = p["gate"] + ([f"commit-{commit}"] if commit != "—" else [])
         lines.append(
             f"| {p['scenario']} | {pareto}{p['combo']} | {_run_count_cell(p)} "
             f"| {', '.join(p['verdicts'])} "
@@ -746,15 +773,13 @@ def _pair_rows(pairs: list[dict[str, Any]]) -> list[str]:
             f"| {_with_spread(p['cost_usd'], _dollar)} "
             f"| {_with_spread(p['quality_score'])} "
             f"| {_with_spread(p['wall_time_s'], _sec_whole)} "
-            f"| {_with_spread(p['compactions'])} "
             f"| {_fmt(p['testing_rounds']['median'])} "
             f"| {_fmt(p['bug_round_trips']['median'])} "
             f"| {_fmt(p['sim_interventions']['median'])} "
             f"| {_with_spread(p['output_tokens'], _thousands)} "
             f"| {_fmt(p['model_requests']['median'])} "
             f"| {tokens_by_role or '—'} "
-            f"| {_commit_cell(p['report_committed'])} "
-            f"| {', '.join(p['gate'])} "
+            f"| {', '.join(gate)} "
             f"| {', '.join(p['stability'])} |"
         )
     return lines
@@ -1015,9 +1040,7 @@ def generate_report(
         "## Summary (scenario × combo)",
         "",
         "Medians over the repeats of each pair; a single run is a repeat count of 1. "
-        "The run count links to the artifacts of the pair's median-wall run. "
-        "`report_committed` (s9) — the measured git_commit_docs discipline: "
-        "a metric, not a verdict gate (a `no` pair can still be green).",
+        "The run count links to the artifacts of the pair's median-wall run.",
         "",
         *_pair_rows(pairs),
         "",
@@ -1154,6 +1177,7 @@ def _md_to_html(md: str) -> str:
     ]
     lines = md.splitlines()
     i = 0
+    section = ""  # current `## ` heading — some tables are section-scoped
     while i < len(lines):
         line = lines[i]
         if not line.strip():
@@ -1164,6 +1188,7 @@ def _md_to_html(md: str) -> str:
             i += 1
         elif line.startswith("## "):
             out.append(f"<h2>{_md_inline(line[3:])}</h2>")
+            section = line[3:].strip()
             i += 1
         elif line.startswith("# "):
             out.append(f"<h1>{_md_inline(line[2:])}</h1>")
@@ -1176,7 +1201,35 @@ def _md_to_html(md: str) -> str:
                     rows.append(cells)
                 i += 1
             out.append("<table>")
-            verdict_col: int | None = None
+            # Colouring hook: locate the verdict column of the summary/runs
+            # tables (the dissection tables have none) and derive each
+            # data row's verdict class from the ORIGINAL rows — the summary
+            # table then drops its `verdicts` column in the HTML rendering
+            # (the row background + `pass rate` already carry the outcome),
+            # so the class must be computed before the drop.
+            verdict_col = next(
+                (
+                    c
+                    for c, cell in enumerate(rows[0])
+                    if cell.lower() in ("verdict", "verdicts", "outcome")
+                ),
+                None,
+            )
+            row_verdict_classes: list[str | None] = [
+                _verdict_row_class(row[verdict_col])
+                if verdict_col is not None and verdict_col < len(row)
+                else None
+                for row in rows[1:]
+            ]
+            # Summary-table-only column drop (§10): inside the "## Summary
+            # (scenario × combo)" section the `verdicts` column is hidden
+            # in HTML (the markdown keeps it); other tables — the Runs
+            # table has its own per-run `verdict` column — are untouched.
+            drop_col = None
+            if section == "Summary (scenario × combo)":
+                drop_col = next((c for c, cell in enumerate(rows[0]) if cell == "verdicts"), None)
+            if drop_col is not None:
+                rows = [[cell for ci, cell in enumerate(row) if ci != drop_col] for row in rows]
             # The two-line spread layout is a summary-table feature —
             # recognized by its wall-time header (the runs/dissection
             # tables have no spread cells to transform).
@@ -1190,17 +1243,9 @@ def _md_to_html(md: str) -> str:
             prev_scenario: str | None = None
             for r, row in enumerate(rows):
                 tag = "th" if r == 0 else "td"
-                if r == 0:
-                    # Colouring hook: locate the verdict column of the
-                    # summary/runs tables and the outcome column of the
-                    # winners table (the dissection tables have none).
-                    for c, cell in enumerate(row):
-                        if cell.lower() in ("verdict", "verdicts", "outcome"):
-                            verdict_col = c
-                            break
                 classes: list[str] = []
-                if r > 0 and verdict_col is not None and verdict_col < len(row):
-                    row_cls = _verdict_row_class(row[verdict_col])
+                if r > 0:
+                    row_cls = row_verdict_classes[r - 1]
                     if row_cls:
                         classes.append(row_cls)
                 # Scenario-cluster hook: in the summary table the first

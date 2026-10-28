@@ -26,8 +26,8 @@ prompt really committed the report) is NOT a verdict condition anymore
     S9 metric: report_committed=true|false
 
 which bench/run_one.py parses out of stdout into result.json
-(`checks_metrics`) and the report aggregates into a dedicated
-`report_committed` column (§10). The workspace is a git repo with a
+(`checks_metrics`) and the report aggregates into the `gate` cell as
+commit-yes/no/mixed codes (§10). The workspace is a git repo with a
 seed commit (bench/env_setup.py) and the brief tells the agent to
 create the file with write_file so it lands in task.edited_files and
 is committable; when git itself is unavailable the metric line is

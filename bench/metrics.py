@@ -1647,7 +1647,7 @@ def extract_run_metrics(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
             # Non-verdict facts from checks.py stdout (`S9 metric:
             # report_committed=true`, bench/run_one.CHECKS_METRIC_RE):
             # e.g. s9's commit discipline is measured, not gated — the
-            # report renders it as its own `report_committed` column.
+            # report renders it as commit-* codes in the `gate` cell.
             "checks_metrics": result.get("checks_metrics") or {},
             "settle_elapsed_s": result.get("settle_elapsed_s"),
             "started_at": result.get("started_at"),
